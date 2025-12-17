@@ -1712,8 +1712,83 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
         let enableFp16: Int32 = options.precision.contains(.fp16) ? 1 : 0
         let workspace = options.workspaceSizeBytes.map { max(0, $0) } ?? 0
 
-        let status = onnxURL.path.withCString { pathPtr in
-            trt_build_engine_from_onnx_file(pathPtr, enableFp16, workspace, &rawPtr, &size)
+        func flattenProfileRanges() -> (names: [String], ranges: [trt_profile_binding_range], profileCount: Int32) {
+            guard !options.profiles.isEmpty else {
+                return ([], [], 0)
+            }
+
+            var names: [String] = []
+            var entries: [trt_profile_binding_range] = []
+            entries.reserveCapacity(options.profiles.reduce(0) { $0 + $1.bindingRanges.count })
+
+            for (profileIndex, profile) in options.profiles.enumerated() {
+                for (tensorName, range) in profile.bindingRanges {
+                    names.append(tensorName)
+
+                    var entry = trt_profile_binding_range()
+                    entry.profileIndex = Int32(profileIndex)
+                    entry.tensorName = nil
+                    entry.nbDims = Int32(range.min.rank)
+
+                    func fill(_ src: TensorShape, _ dst: UnsafeMutablePointer<Int32>) {
+                        for i in 0..<TensorShape.maxRank {
+                            dst[i] = (i < src.rank) ? src.dims[i] : 0
+                        }
+                    }
+
+                    withUnsafeMutablePointer(to: &entry.minDims) { ptr in
+                        ptr.withMemoryRebound(to: Int32.self, capacity: TensorShape.maxRank) { fill(range.min, $0) }
+                    }
+                    withUnsafeMutablePointer(to: &entry.optDims) { ptr in
+                        ptr.withMemoryRebound(to: Int32.self, capacity: TensorShape.maxRank) { fill(range.optimal, $0) }
+                    }
+                    withUnsafeMutablePointer(to: &entry.maxDims) { ptr in
+                        ptr.withMemoryRebound(to: Int32.self, capacity: TensorShape.maxRank) { fill(range.max, $0) }
+                    }
+
+                    entries.append(entry)
+                }
+            }
+
+            return (names, entries, Int32(options.profiles.count))
+        }
+
+        let flattened = flattenProfileRanges()
+        let status: Int32 = onnxURL.path.withCString { pathPtr in
+            func withCStringPointers<R>(_ strings: [String], _ body: ([UnsafePointer<CChar>]) throws -> R) rethrows -> R {
+                var allocations: [UnsafeMutablePointer<CChar>] = []
+                allocations.reserveCapacity(strings.count)
+                defer { allocations.forEach { $0.deallocate() } }
+
+                let pointers: [UnsafePointer<CChar>] = strings.map { string in
+                    let utf8 = Array(string.utf8CString)
+                    let ptr = UnsafeMutablePointer<CChar>.allocate(capacity: utf8.count)
+                    ptr.initialize(from: utf8, count: utf8.count)
+                    allocations.append(ptr)
+                    return UnsafePointer(ptr)
+                }
+                return try body(pointers)
+            }
+
+            return withCStringPointers(flattened.names) { namePtrs in
+                var ranges = flattened.ranges
+                for i in 0..<ranges.count {
+                    ranges[i].tensorName = namePtrs[i]
+                }
+                if ranges.isEmpty {
+                    return trt_build_engine_from_onnx_file(pathPtr, enableFp16, workspace, &rawPtr, &size)
+                }
+                return trt_build_engine_from_onnx_file_with_profiles(
+                    pathPtr,
+                    enableFp16,
+                    workspace,
+                    ranges,
+                    Int32(ranges.count),
+                    flattened.profileCount,
+                    &rawPtr,
+                    &size
+                )
+            }
         }
 
         guard status == 0, let rawPtr, size > 0 else {

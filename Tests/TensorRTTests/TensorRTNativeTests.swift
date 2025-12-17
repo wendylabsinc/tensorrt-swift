@@ -105,6 +105,78 @@ import TensorRTNative
     #expect(output == input)
 }
 
+@Test("Build dynamic ONNX with profiles and switch at runtime") func tensorRTDynamicONNXProfiles() async throws {
+    // A minimal ONNX identity model (opset 13) with input/output [dynamic] float.
+    let onnxBase64 = "CAc6VAoZCgVpbnB1dBIGb3V0cHV0IghJZGVudGl0eRIQRHluSWRlbnRpdHlHcmFwaFoRCgVpbnB1dBIICgYIARICCgBiEgoGb3V0cHV0EggKBggBEgIKAEIECgAQDQ=="
+    guard let onnxData = Data(base64Encoded: onnxBase64) else {
+        throw TensorRTError.runtimeUnavailable("Failed to decode embedded ONNX dynamic fixture.")
+    }
+
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tensorrt-swift-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmpURL, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    let onnxURL = tmpURL.appendingPathComponent("dynamic_identity.onnx")
+    try onnxData.write(to: onnxURL)
+
+    let p0 = OptimizationProfile(
+        name: "0",
+        axes: [:],
+        bindingRanges: [
+            "input": .init(min: TensorShape([1]), optimal: TensorShape([8]), max: TensorShape([16])),
+        ]
+    )
+    let p1 = OptimizationProfile(
+        name: "1",
+        axes: [:],
+        bindingRanges: [
+            "input": .init(min: TensorShape([32]), optimal: TensorShape([32]), max: TensorShape([64])),
+        ]
+    )
+
+    let runtime = TensorRTRuntime()
+    let engine = try runtime.buildEngine(
+        onnxURL: onnxURL,
+        options: EngineBuildOptions(precision: [.fp32], profiles: [p0, p1])
+    )
+    #expect(engine.serialized != nil)
+    #expect(engine.description.profileNames.count >= 2)
+    #expect(engine.description.inputs.count == 1)
+    #expect(engine.description.outputs.count == 1)
+    #expect(engine.description.inputs[0].descriptor.shape.isDynamic == true)
+
+    let context = try engine.makeExecutionContext()
+    let inputDescriptor = engine.description.inputs[0].descriptor
+
+    func run(count: Int) async throws -> [Float] {
+        let input: [Float] = (0..<count).map(Float.init)
+        let inputData = input.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        let batch = InferenceBatch(inputs: ["input": TensorValue(descriptor: inputDescriptor, storage: .host(inputData))])
+        let result = try await context.enqueue(batch, synchronously: true)
+        guard let out = result.outputs["output"] else { throw TensorRTError.invalidBinding("Missing output") }
+        guard case .host(let outData) = out.storage else { throw TensorRTError.notImplemented("Expected host output") }
+
+        var output = [Float](repeating: 0, count: count)
+        output.withUnsafeMutableBytes { outBytes in
+            outData.withUnsafeBytes { inBytes in
+                outBytes.copyBytes(from: inBytes.prefix(outBytes.count))
+            }
+        }
+        return output
+    }
+
+    try await context.setOptimizationProfile(named: "0")
+    try await context.reshape(bindings: ["input": TensorShape([8])])
+    #expect(try await run(count: 8) == (0..<8).map(Float.init))
+
+    try await context.setOptimizationProfile(named: "1")
+    try await context.reshape(bindings: ["input": TensorShape([32])])
+    #expect(try await run(count: 32) == (0..<32).map(Float.init))
+}
+
 @Test("TensorRT runtime create/destroy") func tensorRTRuntimeLifecycle() async throws {
     _ = try TensorRTSystem.Runtime()
     #expect(true)

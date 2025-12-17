@@ -614,8 +614,40 @@ int trt_build_engine_from_onnx_file(
   uint8_t** outData,
   size_t* outSize
 ) {
+  return trt_build_engine_from_onnx_file_with_profiles(
+    onnxPath,
+    enableFp16,
+    workspaceSizeBytes,
+    nullptr,
+    0,
+    0,
+    outData,
+    outSize
+  );
+}
+
+int trt_build_engine_from_onnx_file_with_profiles(
+  const char* onnxPath,
+  int32_t enableFp16,
+  size_t workspaceSizeBytes,
+  const trt_profile_binding_range* profileRanges,
+  int32_t profileRangeCount,
+  int32_t profileCount,
+  uint8_t** outData,
+  size_t* outSize
+) {
   if (!onnxPath || onnxPath[0] == '\0' || !outData || !outSize) {
     return 1;
+  }
+  if (profileCount < 0 || profileRangeCount < 0) {
+    return 2;
+  }
+  if ((profileCount == 0) != (profileRangeCount == 0)) {
+    // If profiles are provided, we require at least one range entry.
+    return 3;
+  }
+  if (profileRangeCount > 0 && !profileRanges) {
+    return 4;
   }
 
   *outData = nullptr;
@@ -625,21 +657,21 @@ int trt_build_engine_from_onnx_file(
 
   nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(logger());
   if (!builder) {
-    return 2;
+    return 10;
   }
 
   uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
   nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
   if (!network) {
     trtDestroy(builder);
-    return 3;
+    return 11;
   }
 
   auto* parser = nvonnxparser::createParser(*network, logger());
   if (!parser) {
     trtDestroy(network);
     trtDestroy(builder);
-    return 4;
+    return 12;
   }
 
   // Use warning level to avoid noisy logs (we use a silent logger anyway).
@@ -648,7 +680,7 @@ int trt_build_engine_from_onnx_file(
     trtDestroy(parser);
     trtDestroy(network);
     trtDestroy(builder);
-    return 5;
+    return 13;
   }
 
   nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
@@ -656,7 +688,7 @@ int trt_build_engine_from_onnx_file(
     trtDestroy(parser);
     trtDestroy(network);
     trtDestroy(builder);
-    return 6;
+    return 14;
   }
 
   size_t workspace = workspaceSizeBytes != 0 ? workspaceSizeBytes : (1U << 28); // 256MB default
@@ -664,6 +696,87 @@ int trt_build_engine_from_onnx_file(
 
   if (enableFp16 != 0) {
     config->setFlag(nvinfer1::BuilderFlag::kFP16);
+  }
+
+  if (profileCount > 0) {
+    // Create all profiles first.
+    std::vector<nvinfer1::IOptimizationProfile*> profiles;
+    profiles.reserve(static_cast<size_t>(profileCount));
+    for (int32_t i = 0; i < profileCount; i++) {
+      auto* p = builder->createOptimizationProfile();
+      if (!p) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 20;
+      }
+      profiles.push_back(p);
+    }
+
+    // Apply ranges per entry.
+    for (int32_t i = 0; i < profileRangeCount; i++) {
+      auto const& entry = profileRanges[i];
+      if (entry.profileIndex < 0 || entry.profileIndex >= profileCount) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 21;
+      }
+      if (!entry.tensorName || entry.tensorName[0] == '\0') {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 22;
+      }
+      if (entry.nbDims <= 0 || entry.nbDims > nvinfer1::Dims::MAX_DIMS) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 23;
+      }
+
+      nvinfer1::Dims dmin;
+      nvinfer1::Dims dopt;
+      nvinfer1::Dims dmax;
+      dmin.nbDims = entry.nbDims;
+      dopt.nbDims = entry.nbDims;
+      dmax.nbDims = entry.nbDims;
+      for (int32_t d = 0; d < entry.nbDims; d++) {
+        dmin.d[d] = entry.minDims[d];
+        dopt.d[d] = entry.optDims[d];
+        dmax.d[d] = entry.maxDims[d];
+      }
+
+      bool ok = true;
+      ok = ok && profiles[static_cast<size_t>(entry.profileIndex)]
+                    ->setDimensions(entry.tensorName, nvinfer1::OptProfileSelector::kMIN, dmin);
+      ok = ok && profiles[static_cast<size_t>(entry.profileIndex)]
+                    ->setDimensions(entry.tensorName, nvinfer1::OptProfileSelector::kOPT, dopt);
+      ok = ok && profiles[static_cast<size_t>(entry.profileIndex)]
+                    ->setDimensions(entry.tensorName, nvinfer1::OptProfileSelector::kMAX, dmax);
+      if (!ok) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 24;
+      }
+    }
+
+    // Add profiles to config in order.
+    for (int32_t i = 0; i < profileCount; i++) {
+      if (config->addOptimizationProfile(profiles[static_cast<size_t>(i)]) < 0) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 25;
+      }
+    }
   }
 
   nvinfer1::IHostMemory* serialized = builder->buildSerializedNetwork(*network, *config);
@@ -674,13 +787,13 @@ int trt_build_engine_from_onnx_file(
 
   if (!serialized || !serialized->data() || serialized->size() == 0) {
     trtDestroy(serialized);
-    return 7;
+    return 30;
   }
 
   void* buffer = std::malloc(serialized->size());
   if (!buffer) {
     trtDestroy(serialized);
-    return 8;
+    return 31;
   }
   std::memcpy(buffer, serialized->data(), serialized->size());
   *outData = reinterpret_cast<uint8_t*>(buffer);

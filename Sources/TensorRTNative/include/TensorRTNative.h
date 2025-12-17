@@ -90,6 +90,29 @@ typedef struct trt_io_tensor_desc {
   char name[TRT_MAX_NAME];
 } trt_io_tensor_desc;
 
+typedef struct trt_profile_binding_range {
+  int32_t profileIndex;
+  char const* tensorName;
+  int32_t nbDims;
+  int32_t minDims[TRT_MAX_DIMS];
+  int32_t optDims[TRT_MAX_DIMS];
+  int32_t maxDims[TRT_MAX_DIMS];
+} trt_profile_binding_range;
+
+// Builds a TensorRT engine from an ONNX file with explicit optimization profiles (dynamic shapes).
+// Provide `profileCount > 0` and one or more `profileRanges` entries for each profile/input.
+// Returns 0 on success and fills a serialized engine plan buffer to be freed with trt_free().
+int trt_build_engine_from_onnx_file_with_profiles(
+  const char* onnxPath,
+  int32_t enableFp16,
+  size_t workspaceSizeBytes,
+  const trt_profile_binding_range* profileRanges,
+  int32_t profileRangeCount,
+  int32_t profileCount,
+  uint8_t** outData,
+  size_t* outSize
+);
+
 int trt_engine_get_io_count(uintptr_t engine, int32_t* outCount);
 int trt_engine_get_io_desc(uintptr_t engine, int32_t index, trt_io_tensor_desc* outDesc);
 // Returns the number of optimization profiles in the engine.
