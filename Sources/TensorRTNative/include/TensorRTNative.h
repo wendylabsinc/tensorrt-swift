@@ -83,6 +83,9 @@ int trt_execute_plan_host(
 // Creates a context bound to a serialized plan and a CUDA stream.
 // Returns 0 on failure.
 uintptr_t trt_context_create(const void* plan, size_t planSize);
+// Creates a context bound to a caller-provided CUDA stream (device 0 primary context).
+// When `ownsStream` is non-zero, the context will destroy the stream on `trt_context_destroy`.
+uintptr_t trt_context_create_with_stream(const void* plan, size_t planSize, uint64_t stream, int32_t ownsStream);
 void trt_context_destroy(uintptr_t ctx);
 
 // Sets an input shape on a persistent context (TensorRT 10+).
@@ -117,6 +120,9 @@ int trt_context_execute_device(
 
 // Minimal CUDA driver helpers (for tests and low-level users).
 // These use the CUDA primary context for device 0.
+int trt_cuda_stream_create(uint64_t* outStream);
+int trt_cuda_stream_destroy(uint64_t stream);
+int trt_cuda_stream_synchronize(uint64_t stream);
 int trt_cuda_malloc(size_t byteCount, uint64_t* outAddress);
 int trt_cuda_free(uint64_t address);
 int trt_cuda_memcpy_htod(uint64_t dstAddress, const void* src, size_t byteCount);

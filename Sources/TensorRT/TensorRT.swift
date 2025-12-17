@@ -819,7 +819,15 @@ public actor ExecutionContext: ExecutionContexting {
         }
 
         let handle: UInt = plan.withUnsafeBytes { bytes in
-            trt_context_create(bytes.baseAddress, bytes.count)
+            switch queue {
+            case .automatic:
+                return trt_context_create(bytes.baseAddress, bytes.count)
+            case .external(let streamIdentifier):
+                return trt_context_create_with_stream(bytes.baseAddress, bytes.count, streamIdentifier, 0)
+            case .capturedGraph(let streamIdentifier):
+                // TODO: expose CUDA graph capture semantics; for now this uses the provided stream.
+                return trt_context_create_with_stream(bytes.baseAddress, bytes.count, streamIdentifier, 0)
+            }
         }
         guard handle != 0 else {
             throw TensorRTError.runtimeUnavailable("Failed to create persistent TensorRT execution context.")
