@@ -2,10 +2,14 @@
 
 #include <cuda.h>
 #include <NvInfer.h>
+#include <NvInferPlugin.h>
 #include <NvInferVersion.h>
+#include <NvOnnxParser.h>
 
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -19,6 +23,19 @@ public:
 SilentLogger& logger() {
   static SilentLogger instance;
   return instance;
+}
+
+std::once_flag pluginsInitOnce;
+int pluginsInitStatus = -1;
+std::mutex pluginHandlesMutex;
+std::vector<void*> pluginHandles;
+
+void retainPluginHandle(void* handle) {
+  if (!handle) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(pluginHandlesMutex);
+  pluginHandles.push_back(handle);
 }
 
 template <typename T>
@@ -67,47 +84,19 @@ bool fillDims(int32_t* outDims, int32_t maxDims, nvinfer1::Dims const& dims, int
   return true;
 }
 
-CUresult ensureCudaPrimaryContext(CUcontext* outCtx) {
-  if (!outCtx) {
-    return CUDA_ERROR_INVALID_VALUE;
-  }
-  CUresult status = cuInit(0);
-  if (status != CUDA_SUCCESS) {
-    return status;
-  }
-
-  CUdevice device;
-  status = cuDeviceGet(&device, 0);
-  if (status != CUDA_SUCCESS) {
-    return status;
-  }
-
-  CUcontext ctx;
-  status = cuDevicePrimaryCtxRetain(&ctx, device);
-  if (status != CUDA_SUCCESS) {
-    return status;
-  }
-
-  status = cuCtxSetCurrent(ctx);
-  if (status != CUDA_SUCCESS) {
-    cuDevicePrimaryCtxRelease(device);
-    return status;
-  }
-
-  *outCtx = ctx;
-  return CUDA_SUCCESS;
-}
-
 class CudaPrimaryCtxGuard {
 public:
   CudaPrimaryCtxGuard() = default;
 
-  CUresult init() {
+  CUresult init(int32_t deviceIndex) {
+    if (deviceIndex < 0) {
+      return CUDA_ERROR_INVALID_VALUE;
+    }
     CUresult status = cuInit(0);
     if (status != CUDA_SUCCESS) {
       return status;
     }
-    status = cuDeviceGet(&device_, 0);
+    status = cuDeviceGet(&device_, deviceIndex);
     if (status != CUDA_SUCCESS) {
       return status;
     }
@@ -118,6 +107,15 @@ public:
     retained_ = true;
     return cuCtxSetCurrent(ctx_);
   }
+
+  CUresult setCurrent() const {
+    if (!retained_) {
+      return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    return cuCtxSetCurrent(ctx_);
+  }
+
+  CUcontext ctx() const { return ctx_; }
 
   ~CudaPrimaryCtxGuard() {
     if (retained_) {
@@ -158,7 +156,9 @@ struct DeviceBuffer {
 
 struct PersistentExecutionContext {
   CudaPrimaryCtxGuard cuda;
-  CudaStreamGuard stream;
+  int32_t deviceIndex{0};
+  CUstream stream{};
+  bool destroyStream{false};
   uintptr_t engineHandle{0};
   nvinfer1::ICudaEngine* engine{nullptr};
   nvinfer1::IExecutionContext* exec{nullptr};
@@ -202,6 +202,58 @@ int trt_get_version(int* major, int* minor, int* patch, int* build) {
   *patch = getInferLibPatchVersion();
   *build = getInferLibBuildVersion();
   return (*major > 0) ? 0 : 2;
+}
+
+int trt_plugins_initialize(void) {
+  std::call_once(pluginsInitOnce, []() {
+    // Some TensorRT installs require the plugin library to be explicitly loaded
+    // before initLibNvInferPlugins can register built-in plugins.
+    void* handle = dlopen("libnvinfer_plugin.so", RTLD_NOW | RTLD_LOCAL);
+    if (handle) {
+      retainPluginHandle(handle);
+    }
+
+    bool ok = initLibNvInferPlugins(&logger(), "");
+    pluginsInitStatus = ok ? 0 : 1;
+  });
+
+  if (pluginsInitStatus < 0) {
+    return 2;
+  }
+  return pluginsInitStatus;
+}
+
+int trt_plugins_load_library(const char* path) {
+  if (!path || path[0] == '\0') {
+    return 1;
+  }
+
+  (void)trt_plugins_initialize();
+
+  void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  if (!handle) {
+    return 2;
+  }
+
+  retainPluginHandle(handle);
+  return 0;
+}
+
+int trt_cuda_device_count(int32_t* outCount) {
+  if (!outCount) {
+    return 1;
+  }
+  CUresult status = cuInit(0);
+  if (status != CUDA_SUCCESS) {
+    return 2;
+  }
+  int count = 0;
+  status = cuDeviceGetCount(&count);
+  if (status != CUDA_SUCCESS) {
+    return 3;
+  }
+  *outCount = static_cast<int32_t>(count);
+  return 0;
 }
 
 uintptr_t trt_create_runtime(void) {
@@ -430,6 +482,326 @@ int trt_build_dynamic_identity_engine_f32(int32_t min, int32_t opt, int32_t max,
   return 0;
 }
 
+int trt_build_dual_profile_identity_engine_f32(
+  int32_t min0,
+  int32_t opt0,
+  int32_t max0,
+  int32_t min1,
+  int32_t opt1,
+  int32_t max1,
+  uint8_t** outData,
+  size_t* outSize
+) {
+  if (!outData || !outSize) {
+    return 1;
+  }
+  if (min0 <= 0 || opt0 <= 0 || max0 <= 0 || min0 > opt0 || opt0 > max0) {
+    return 2;
+  }
+  if (min1 <= 0 || opt1 <= 0 || max1 <= 0 || min1 > opt1 || opt1 > max1) {
+    return 3;
+  }
+
+  *outData = nullptr;
+  *outSize = 0;
+
+  nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(logger());
+  if (!builder) {
+    return 4;
+  }
+
+  uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+  nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
+  if (!network) {
+    trtDestroy(builder);
+    return 5;
+  }
+
+  nvinfer1::Dims inputDims;
+  inputDims.nbDims = 1;
+  inputDims.d[0] = -1;
+  auto* input = network->addInput("input", nvinfer1::DataType::kFLOAT, inputDims);
+  if (!input) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 6;
+  }
+
+  auto* identity = network->addIdentity(*input);
+  if (!identity) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 7;
+  }
+
+  auto* out = identity->getOutput(0);
+  if (!out) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 8;
+  }
+  out->setName("output");
+  network->markOutput(*out);
+
+  nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
+  if (!config) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 9;
+  }
+
+  config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1U << 20);
+
+  auto addProfile = [&](int32_t min, int32_t opt, int32_t max) -> bool {
+    nvinfer1::IOptimizationProfile* profile = builder->createOptimizationProfile();
+    if (!profile) {
+      return false;
+    }
+
+    nvinfer1::Dims dmin;
+    dmin.nbDims = 1;
+    dmin.d[0] = min;
+    nvinfer1::Dims dopt;
+    dopt.nbDims = 1;
+    dopt.d[0] = opt;
+    nvinfer1::Dims dmax;
+    dmax.nbDims = 1;
+    dmax.d[0] = max;
+
+    bool ok = true;
+    ok = ok && profile->setDimensions("input", nvinfer1::OptProfileSelector::kMIN, dmin);
+    ok = ok && profile->setDimensions("input", nvinfer1::OptProfileSelector::kOPT, dopt);
+    ok = ok && profile->setDimensions("input", nvinfer1::OptProfileSelector::kMAX, dmax);
+    if (!ok) {
+      return false;
+    }
+    return config->addOptimizationProfile(profile) >= 0;
+  };
+
+  if (!addProfile(min0, opt0, max0) || !addProfile(min1, opt1, max1)) {
+    trtDestroy(config);
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 10;
+  }
+
+  nvinfer1::IHostMemory* serialized = builder->buildSerializedNetwork(*network, *config);
+  trtDestroy(config);
+  trtDestroy(network);
+  trtDestroy(builder);
+
+  if (!serialized || !serialized->data() || serialized->size() == 0) {
+    trtDestroy(serialized);
+    return 11;
+  }
+
+  void* buffer = std::malloc(serialized->size());
+  if (!buffer) {
+    trtDestroy(serialized);
+    return 12;
+  }
+  std::memcpy(buffer, serialized->data(), serialized->size());
+  *outData = reinterpret_cast<uint8_t*>(buffer);
+  *outSize = serialized->size();
+  trtDestroy(serialized);
+  return 0;
+}
+
+int trt_build_engine_from_onnx_file(
+  const char* onnxPath,
+  int32_t enableFp16,
+  size_t workspaceSizeBytes,
+  uint8_t** outData,
+  size_t* outSize
+) {
+  return trt_build_engine_from_onnx_file_with_profiles(
+    onnxPath,
+    enableFp16,
+    workspaceSizeBytes,
+    nullptr,
+    0,
+    0,
+    outData,
+    outSize
+  );
+}
+
+int trt_build_engine_from_onnx_file_with_profiles(
+  const char* onnxPath,
+  int32_t enableFp16,
+  size_t workspaceSizeBytes,
+  const trt_profile_binding_range* profileRanges,
+  int32_t profileRangeCount,
+  int32_t profileCount,
+  uint8_t** outData,
+  size_t* outSize
+) {
+  if (!onnxPath || onnxPath[0] == '\0' || !outData || !outSize) {
+    return 1;
+  }
+  if (profileCount < 0 || profileRangeCount < 0) {
+    return 2;
+  }
+  if ((profileCount == 0) != (profileRangeCount == 0)) {
+    // If profiles are provided, we require at least one range entry.
+    return 3;
+  }
+  if (profileRangeCount > 0 && !profileRanges) {
+    return 4;
+  }
+
+  *outData = nullptr;
+  *outSize = 0;
+
+  (void)trt_plugins_initialize();
+
+  nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(logger());
+  if (!builder) {
+    return 10;
+  }
+
+  uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+  nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
+  if (!network) {
+    trtDestroy(builder);
+    return 11;
+  }
+
+  auto* parser = nvonnxparser::createParser(*network, logger());
+  if (!parser) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 12;
+  }
+
+  // Use warning level to avoid noisy logs (we use a silent logger anyway).
+  bool parsed = parser->parseFromFile(onnxPath, static_cast<int>(nvinfer1::ILogger::Severity::kWARNING));
+  if (!parsed) {
+    trtDestroy(parser);
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 13;
+  }
+
+  nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
+  if (!config) {
+    trtDestroy(parser);
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 14;
+  }
+
+  size_t workspace = workspaceSizeBytes != 0 ? workspaceSizeBytes : (1U << 28); // 256MB default
+  config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, workspace);
+
+  if (enableFp16 != 0) {
+    config->setFlag(nvinfer1::BuilderFlag::kFP16);
+  }
+
+  if (profileCount > 0) {
+    // Create all profiles first.
+    std::vector<nvinfer1::IOptimizationProfile*> profiles;
+    profiles.reserve(static_cast<size_t>(profileCount));
+    for (int32_t i = 0; i < profileCount; i++) {
+      auto* p = builder->createOptimizationProfile();
+      if (!p) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 20;
+      }
+      profiles.push_back(p);
+    }
+
+    // Apply ranges per entry.
+    for (int32_t i = 0; i < profileRangeCount; i++) {
+      auto const& entry = profileRanges[i];
+      if (entry.profileIndex < 0 || entry.profileIndex >= profileCount) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 21;
+      }
+      if (!entry.tensorName || entry.tensorName[0] == '\0') {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 22;
+      }
+      if (entry.nbDims <= 0 || entry.nbDims > nvinfer1::Dims::MAX_DIMS) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 23;
+      }
+
+      nvinfer1::Dims dmin;
+      nvinfer1::Dims dopt;
+      nvinfer1::Dims dmax;
+      dmin.nbDims = entry.nbDims;
+      dopt.nbDims = entry.nbDims;
+      dmax.nbDims = entry.nbDims;
+      for (int32_t d = 0; d < entry.nbDims; d++) {
+        dmin.d[d] = entry.minDims[d];
+        dopt.d[d] = entry.optDims[d];
+        dmax.d[d] = entry.maxDims[d];
+      }
+
+      bool ok = true;
+      ok = ok && profiles[static_cast<size_t>(entry.profileIndex)]
+                    ->setDimensions(entry.tensorName, nvinfer1::OptProfileSelector::kMIN, dmin);
+      ok = ok && profiles[static_cast<size_t>(entry.profileIndex)]
+                    ->setDimensions(entry.tensorName, nvinfer1::OptProfileSelector::kOPT, dopt);
+      ok = ok && profiles[static_cast<size_t>(entry.profileIndex)]
+                    ->setDimensions(entry.tensorName, nvinfer1::OptProfileSelector::kMAX, dmax);
+      if (!ok) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 24;
+      }
+    }
+
+    // Add profiles to config in order.
+    for (int32_t i = 0; i < profileCount; i++) {
+      if (config->addOptimizationProfile(profiles[static_cast<size_t>(i)]) < 0) {
+        trtDestroy(config);
+        trtDestroy(parser);
+        trtDestroy(network);
+        trtDestroy(builder);
+        return 25;
+      }
+    }
+  }
+
+  nvinfer1::IHostMemory* serialized = builder->buildSerializedNetwork(*network, *config);
+  trtDestroy(config);
+  trtDestroy(parser);
+  trtDestroy(network);
+  trtDestroy(builder);
+
+  if (!serialized || !serialized->data() || serialized->size() == 0) {
+    trtDestroy(serialized);
+    return 30;
+  }
+
+  void* buffer = std::malloc(serialized->size());
+  if (!buffer) {
+    trtDestroy(serialized);
+    return 31;
+  }
+  std::memcpy(buffer, serialized->data(), serialized->size());
+  *outData = reinterpret_cast<uint8_t*>(buffer);
+  *outSize = serialized->size();
+  trtDestroy(serialized);
+  return 0;
+}
+
 void trt_free(void* ptr) {
   std::free(ptr);
 }
@@ -438,6 +810,7 @@ uintptr_t trt_deserialize_engine(const void* data, size_t size) {
   if (!data || size == 0) {
     return 0;
   }
+  (void)trt_plugins_initialize();
   nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(logger());
   if (!runtime) {
     return 0;
@@ -456,6 +829,15 @@ void trt_destroy_engine(uintptr_t engine) {
   }
   auto* ptr = reinterpret_cast<nvinfer1::ICudaEngine*>(engine);
   trtDestroy(ptr);
+}
+
+int trt_engine_get_profile_count(uintptr_t engine, int32_t* outCount) {
+  if (!engine || !outCount) {
+    return 1;
+  }
+  auto* ptr = reinterpret_cast<nvinfer1::ICudaEngine*>(engine);
+  *outCount = static_cast<int32_t>(ptr->getNbOptimizationProfiles());
+  return (*outCount >= 0) ? 0 : 2;
 }
 
 int trt_engine_get_io_count(uintptr_t engine, int32_t* outCount) {
@@ -532,7 +914,7 @@ int trt_execute_plan_host(
   }
 
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -657,7 +1039,11 @@ int trt_execute_plan_host(
 }
 
 uintptr_t trt_context_create(const void* plan, size_t planSize) {
-  if (!plan || planSize == 0) {
+  return trt_context_create_on_device(plan, planSize, 0);
+}
+
+uintptr_t trt_context_create_on_device(const void* plan, size_t planSize, int32_t deviceIndex) {
+  if (!plan || planSize == 0 || deviceIndex < 0) {
     return 0;
   }
 
@@ -666,21 +1052,28 @@ uintptr_t trt_context_create(const void* plan, size_t planSize) {
   if (!ctx) {
     return 0;
   }
+  ctx->deviceIndex = deviceIndex;
 
-  CUresult cu = ctx->cuda.init();
+  CUresult cu = ctx->cuda.init(ctx->deviceIndex);
   if (cu != CUDA_SUCCESS) {
     delete ctx;
     return 0;
   }
 
-  cu = ctx->stream.init();
+  CUstream stream = nullptr;
+  cu = cuStreamCreate(&stream, CU_STREAM_DEFAULT);
   if (cu != CUDA_SUCCESS) {
     delete ctx;
     return 0;
   }
+  ctx->stream = stream;
+  ctx->destroyStream = true;
 
   ctx->engineHandle = trt_deserialize_engine(plan, planSize);
   if (!ctx->engineHandle) {
+    if (ctx->destroyStream && ctx->stream) {
+      cuStreamDestroy(ctx->stream);
+    }
     delete ctx;
     return 0;
   }
@@ -690,6 +1083,9 @@ uintptr_t trt_context_create(const void* plan, size_t planSize) {
   if (!ctx->exec) {
     trt_destroy_engine(ctx->engineHandle);
     ctx->engineHandle = 0;
+    if (ctx->destroyStream && ctx->stream) {
+      cuStreamDestroy(ctx->stream);
+    }
     delete ctx;
     return 0;
   }
@@ -698,6 +1094,79 @@ uintptr_t trt_context_create(const void* plan, size_t planSize) {
 #else
   (void)plan;
   (void)planSize;
+  (void)deviceIndex;
+  return 0;
+#endif
+}
+
+uintptr_t trt_context_create_with_stream(const void* plan, size_t planSize, uint64_t stream, int32_t ownsStream) {
+  return trt_context_create_with_stream_on_device(plan, planSize, stream, ownsStream, 0);
+}
+
+uintptr_t trt_context_create_with_stream_on_device(const void* plan, size_t planSize, uint64_t stream, int32_t ownsStream, int32_t deviceIndex) {
+  if (!plan || planSize == 0 || stream == 0 || deviceIndex < 0) {
+    return 0;
+  }
+
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = new (std::nothrow) PersistentExecutionContext();
+  if (!ctx) {
+    return 0;
+  }
+  ctx->deviceIndex = deviceIndex;
+
+  CUresult cu = ctx->cuda.init(ctx->deviceIndex);
+  if (cu != CUDA_SUCCESS) {
+    delete ctx;
+    return 0;
+  }
+
+  ctx->stream = reinterpret_cast<CUstream>(static_cast<uintptr_t>(stream));
+  ctx->destroyStream = (ownsStream != 0);
+
+  // Validate that the provided stream belongs to the same CUDA context (best-effort).
+  CUcontext streamCtx = nullptr;
+  CUresult streamCtxStatus = cuStreamGetCtx(ctx->stream, &streamCtx);
+  if (streamCtxStatus == CUDA_SUCCESS && streamCtx != nullptr) {
+    CUcontext current = nullptr;
+    cuCtxGetCurrent(&current);
+    if (current != streamCtx) {
+      if (ctx->destroyStream && ctx->stream) {
+        cuStreamDestroy(ctx->stream);
+      }
+      delete ctx;
+      return 0;
+    }
+  }
+
+  ctx->engineHandle = trt_deserialize_engine(plan, planSize);
+  if (!ctx->engineHandle) {
+    if (ctx->destroyStream && ctx->stream) {
+      cuStreamDestroy(ctx->stream);
+    }
+    delete ctx;
+    return 0;
+  }
+  ctx->engine = reinterpret_cast<nvinfer1::ICudaEngine*>(ctx->engineHandle);
+
+  ctx->exec = ctx->engine->createExecutionContext();
+  if (!ctx->exec) {
+    trt_destroy_engine(ctx->engineHandle);
+    ctx->engineHandle = 0;
+    if (ctx->destroyStream && ctx->stream) {
+      cuStreamDestroy(ctx->stream);
+    }
+    delete ctx;
+    return 0;
+  }
+
+  return reinterpret_cast<uintptr_t>(ctx);
+#else
+  (void)plan;
+  (void)planSize;
+  (void)stream;
+  (void)ownsStream;
+  (void)deviceIndex;
   return 0;
 #endif
 }
@@ -718,9 +1187,27 @@ void trt_context_destroy(uintptr_t ctxHandle) {
   if (ctx->engineHandle) {
     trt_destroy_engine(ctx->engineHandle);
   }
+  if (ctx->destroyStream && ctx->stream) {
+    cuStreamDestroy(ctx->stream);
+  }
   delete ctx;
 #else
   (void)ctxHandle;
+#endif
+}
+
+int trt_context_get_device_index(uintptr_t ctxHandle, int32_t* outDeviceIndex) {
+  if (!ctxHandle || !outDeviceIndex) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  *outDeviceIndex = ctx->deviceIndex;
+  return 0;
+#else
+  (void)ctxHandle;
+  (void)outDeviceIndex;
+  return 100;
 #endif
 }
 
@@ -739,6 +1226,9 @@ int trt_context_execute_host(
   if (!ctx->exec) {
     return 2;
   }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
+  }
 
   for (int32_t i = 0; i < inputCount; i++) {
     auto const& in = inputs[i];
@@ -752,7 +1242,7 @@ int trt_context_execute_host(
       return 4;
     }
 
-    CUresult cu = cuMemcpyHtoDAsync(dptr, in.data, in.size, ctx->stream.stream());
+    CUresult cu = cuMemcpyHtoDAsync(dptr, in.data, in.size, ctx->stream);
     if (cu != CUDA_SUCCESS) {
       return 5;
     }
@@ -779,7 +1269,7 @@ int trt_context_execute_host(
     }
   }
 
-  if (!ctx->exec->enqueueV3(reinterpret_cast<cudaStream_t>(ctx->stream.stream()))) {
+  if (!ctx->exec->enqueueV3(reinterpret_cast<cudaStream_t>(ctx->stream))) {
     return 10;
   }
 
@@ -789,13 +1279,13 @@ int trt_context_execute_host(
     if (it == ctx->buffers.end() || it->second.ptr == 0) {
       return 11;
     }
-    CUresult cu = cuMemcpyDtoHAsync(out.data, it->second.ptr, out.size, ctx->stream.stream());
+    CUresult cu = cuMemcpyDtoHAsync(out.data, it->second.ptr, out.size, ctx->stream);
     if (cu != CUDA_SUCCESS) {
       return 12;
     }
   }
 
-  CUresult cu = cuStreamSynchronize(ctx->stream.stream());
+  CUresult cu = cuStreamSynchronize(ctx->stream);
   if (cu != CUDA_SUCCESS) {
     return 13;
   }
@@ -810,6 +1300,299 @@ int trt_context_execute_host(
 #endif
 }
 
+int trt_context_execute_device(
+  uintptr_t ctxHandle,
+  const trt_named_buffer* inputs,
+  int32_t inputCount,
+  const trt_named_mutable_buffer* outputs,
+  int32_t outputCount,
+  int32_t synchronously
+) {
+  if (!ctxHandle || !inputs || inputCount < 0 || !outputs || outputCount < 0) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  if (!ctx->exec) {
+    return 2;
+  }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
+  }
+
+  for (int32_t i = 0; i < inputCount; i++) {
+    auto const& in = inputs[i];
+    if (!in.name || !in.data || in.size == 0) {
+      return 3;
+    }
+    if (!ctx->exec->setTensorAddress(in.name, const_cast<void*>(in.data))) {
+      return 4;
+    }
+  }
+
+  for (int32_t i = 0; i < outputCount; i++) {
+    auto const& out = outputs[i];
+    if (!out.name || !out.data || out.size == 0) {
+      return 5;
+    }
+    if (!ctx->exec->setTensorAddress(out.name, out.data)) {
+      return 6;
+    }
+  }
+
+  if (!ctx->exec->enqueueV3(reinterpret_cast<cudaStream_t>(ctx->stream))) {
+    return 7;
+  }
+
+  if (synchronously != 0) {
+    CUresult cu = cuStreamSynchronize(ctx->stream);
+    if (cu != CUDA_SUCCESS) {
+      return 8;
+    }
+  }
+  return 0;
+#else
+  (void)ctxHandle;
+  (void)inputs;
+  (void)inputCount;
+  (void)outputs;
+  (void)outputCount;
+  (void)synchronously;
+  return 100;
+#endif
+}
+
+int trt_cuda_malloc(size_t byteCount, uint64_t* outAddress) {
+  if (!outAddress || byteCount == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  CUdeviceptr ptr = 0;
+  cu = cuMemAlloc(&ptr, byteCount);
+  if (cu != CUDA_SUCCESS) {
+    return 3;
+  }
+  *outAddress = static_cast<uint64_t>(ptr);
+  return 0;
+}
+
+int trt_cuda_stream_create(uint64_t* outStream) {
+  if (!outStream) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  CUstream stream = nullptr;
+  cu = cuStreamCreate(&stream, CU_STREAM_DEFAULT);
+  if (cu != CUDA_SUCCESS) {
+    return 3;
+  }
+  *outStream = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(stream));
+  return 0;
+}
+
+int trt_cuda_stream_destroy(uint64_t stream) {
+  if (stream == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuStreamDestroy(reinterpret_cast<CUstream>(static_cast<uintptr_t>(stream)));
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_stream_synchronize(uint64_t stream) {
+  if (stream == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuStreamSynchronize(reinterpret_cast<CUstream>(static_cast<uintptr_t>(stream)));
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_event_create(uint64_t* outEvent) {
+  if (!outEvent) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  CUevent ev = nullptr;
+  cu = cuEventCreate(&ev, CU_EVENT_DEFAULT);
+  if (cu != CUDA_SUCCESS) {
+    return 3;
+  }
+  *outEvent = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ev));
+  return 0;
+}
+
+int trt_cuda_event_destroy(uint64_t event) {
+  if (event == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuEventDestroy(reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)));
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_event_record(uint64_t event, uint64_t stream) {
+  if (event == 0 || stream == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuEventRecord(
+    reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)),
+    reinterpret_cast<CUstream>(static_cast<uintptr_t>(stream))
+  );
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_event_synchronize(uint64_t event) {
+  if (event == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuEventSynchronize(reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)));
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_event_query(uint64_t event, int32_t* outReady) {
+  if (event == 0 || !outReady) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuEventQuery(reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)));
+  if (cu == CUDA_SUCCESS) {
+    *outReady = 1;
+    return 0;
+  }
+  if (cu == CUDA_ERROR_NOT_READY) {
+    *outReady = 0;
+    return 0;
+  }
+  return 3;
+}
+
+int trt_context_record_event(uintptr_t ctxHandle, uint64_t event) {
+  if (!ctxHandle || event == 0) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  if (!ctx->stream) {
+    return 2;
+  }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
+  }
+  CUresult cu = cuEventRecord(
+    reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)),
+    ctx->stream
+  );
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+#else
+  (void)ctxHandle;
+  (void)event;
+  return 100;
+#endif
+}
+
+int trt_cuda_free(uint64_t address) {
+  if (address == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuMemFree(static_cast<CUdeviceptr>(address));
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_memcpy_htod(uint64_t dstAddress, const void* src, size_t byteCount) {
+  if (dstAddress == 0 || !src || byteCount == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuMemcpyHtoD(static_cast<CUdeviceptr>(dstAddress), src, byteCount);
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_memcpy_dtoh(void* dst, uint64_t srcAddress, size_t byteCount) {
+  if (!dst || srcAddress == 0 || byteCount == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuMemcpyDtoH(dst, static_cast<CUdeviceptr>(srcAddress), byteCount);
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_context_set_optimization_profile(uintptr_t ctxHandle, int32_t profileIndex) {
+  if (!ctxHandle || profileIndex < 0) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  if (!ctx->exec) {
+    return 2;
+  }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
+  }
+
+  // TensorRT requires a stream for async profile switching.
+  if (!ctx->exec->setOptimizationProfileAsync(profileIndex, reinterpret_cast<cudaStream_t>(ctx->stream))) {
+    return 3;
+  }
+  return 0;
+#else
+  (void)ctxHandle;
+  (void)profileIndex;
+  return 100;
+#endif
+}
+
 int trt_context_set_input_shape(uintptr_t ctxHandle, const char* inputName, const int32_t* dims, int32_t nbDims) {
   if (!ctxHandle || !inputName || !dims || nbDims <= 0) {
     return 1;
@@ -818,6 +1601,9 @@ int trt_context_set_input_shape(uintptr_t ctxHandle, const char* inputName, cons
   auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
   if (!ctx->exec) {
     return 2;
+  }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
   }
 
   nvinfer1::Dims d;
@@ -847,6 +1633,9 @@ int trt_context_get_tensor_shape(uintptr_t ctxHandle, const char* tensorName, in
   if (!ctx->exec) {
     return 2;
   }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
+  }
   nvinfer1::Dims d = ctx->exec->getTensorShape(tensorName);
   if (!fillDims(outDims, maxDims, d, outNbDims)) {
     return 3;
@@ -868,7 +1657,7 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
   }
 
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }

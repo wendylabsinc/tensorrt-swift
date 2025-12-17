@@ -539,13 +539,25 @@ public struct EngineLoadConfiguration: Sendable {
     public var device: DeviceSelection
     public var logger: Logger
     public var allowRefit: Bool
+    public var initializePlugins: Bool
+    public var pluginLibraries: [String]
 
-    public init(profile: String? = nil, profileIndex: Int? = nil, device: DeviceSelection = DeviceSelection(), logger: Logger = .standard, allowRefit: Bool = false) {
+    public init(
+        profile: String? = nil,
+        profileIndex: Int? = nil,
+        device: DeviceSelection = DeviceSelection(),
+        logger: Logger = .standard,
+        allowRefit: Bool = false,
+        initializePlugins: Bool = true,
+        pluginLibraries: [String] = []
+    ) {
         self.profile = profile
         self.profileIndex = profileIndex
         self.device = device
         self.logger = logger
         self.allowRefit = allowRefit
+        self.initializePlugins = initializePlugins
+        self.pluginLibraries = pluginLibraries
     }
 }
 
@@ -791,11 +803,18 @@ public actor ExecutionContext: ExecutionContexting {
     public let allocator: MemoryAllocator
     private var nativeContextHandle: NativeContextHandle?
     private var inputShapes: [String: TensorShape] = [:]
+    private var requestedProfileIndex: Int32 = 0
+    private var appliedProfileIndex: Int32?
+    private let deviceIndex: Int32
 
     public init(engine: Engine, queue: ExecutionQueue, allocator: MemoryAllocator = .default) {
         self.engine = engine
         self.queue = queue
         self.allocator = allocator
+        self.deviceIndex = Int32(engine.description.device.gpu ?? 0)
+        if let raw = engine.description.metadata["defaultProfileIndex"], let parsed = Int32(raw) {
+            requestedProfileIndex = parsed
+        }
     }
 
     private final class NativeContextHandle: @unchecked Sendable {
@@ -819,18 +838,59 @@ public actor ExecutionContext: ExecutionContexting {
         }
 
         let handle: UInt = plan.withUnsafeBytes { bytes in
-            trt_context_create(bytes.baseAddress, bytes.count)
+            switch queue {
+            case .automatic:
+                return trt_context_create_on_device(bytes.baseAddress, bytes.count, deviceIndex)
+            case .external(let streamIdentifier):
+                return trt_context_create_with_stream_on_device(bytes.baseAddress, bytes.count, streamIdentifier, 0, deviceIndex)
+            case .capturedGraph(let streamIdentifier):
+                // TODO: expose CUDA graph capture semantics; for now this uses the provided stream.
+                return trt_context_create_with_stream_on_device(bytes.baseAddress, bytes.count, streamIdentifier, 0, deviceIndex)
+            }
         }
         guard handle != 0 else {
             throw TensorRTError.runtimeUnavailable("Failed to create persistent TensorRT execution context.")
         }
         nativeContextHandle = NativeContextHandle(raw: handle)
+        try applyOptimizationProfileIfNeeded(ctx: handle)
         return handle
     }
 #endif
 
 #if canImport(TensorRTNative)
+    internal func nativeDeviceIndexForTesting() throws -> Int32 {
+        guard let plan = engine.serialized else {
+            throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
+        }
+        let ctx = try getOrCreateNativeContext(plan: plan)
+        var idx: Int32 = -1
+        let status = trt_context_get_device_index(ctx, &idx)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to query native context device index (status \(status)).")
+        }
+        return idx
+    }
+#endif
+
+#if canImport(TensorRTNative)
+    private func applyOptimizationProfileIfNeeded(ctx: UInt) throws {
+        if let appliedProfileIndex, appliedProfileIndex == requestedProfileIndex {
+            return
+        }
+        if !engine.description.profileNames.isEmpty {
+            guard requestedProfileIndex >= 0, Int(requestedProfileIndex) < engine.description.profileNames.count else {
+                throw TensorRTError.profileUnavailable("Profile index \(requestedProfileIndex) out of range (engine has \(engine.description.profileNames.count) profiles).")
+            }
+        }
+        let status = trt_context_set_optimization_profile(ctx, requestedProfileIndex)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to set optimization profile \(requestedProfileIndex) (status \(status)).")
+        }
+        appliedProfileIndex = requestedProfileIndex
+    }
+
     private func applyInputShapesIfNeeded(ctx: UInt) throws {
+        try applyOptimizationProfileIfNeeded(ctx: ctx)
         guard !inputShapes.isEmpty else { return }
         for (name, shape) in inputShapes {
             var dims = [Int32](repeating: 0, count: TensorShape.maxRank)
@@ -893,6 +953,7 @@ public actor ExecutionContext: ExecutionContexting {
         }
 
         let ctx = try getOrCreateNativeContext(plan: plan)
+        try applyOptimizationProfileIfNeeded(ctx: ctx)
 
         // For dynamic inputs, require a concrete shape (via reshape()) so we can validate sizes and
         // allow TensorRT to resolve output shapes.
@@ -1215,14 +1276,138 @@ public actor ExecutionContext: ExecutionContexting {
 #endif
     }
 
+    /// Enqueues using device-resident buffers (CUDA device pointers).
+    ///
+    /// This is the lowest-level execution API and is intended for performance-sensitive pipelines where
+    /// inputs/outputs already live on the GPU. The provided `address` values must be valid CUDA device
+    /// pointers for the active device.
+    public func enqueueDevice(
+        inputs: [String: (address: UInt64, length: Int)],
+        outputs: [String: (address: UInt64, length: Int)],
+        synchronously: Bool = true
+    ) async throws {
+#if canImport(TensorRTNative)
+        guard let plan = engine.serialized else {
+            throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
+        }
+        let ctx = try getOrCreateNativeContext(plan: plan)
+        try applyInputShapesIfNeeded(ctx: ctx)
+
+        func withCStringPointers<R>(_ strings: [String], _ body: ([UnsafePointer<CChar>]) throws -> R) rethrows -> R {
+            var allocations: [UnsafeMutablePointer<CChar>] = []
+            allocations.reserveCapacity(strings.count)
+            defer { allocations.forEach { $0.deallocate() } }
+
+            let pointers: [UnsafePointer<CChar>] = strings.map { string in
+                let utf8 = Array(string.utf8CString)
+                let ptr = UnsafeMutablePointer<CChar>.allocate(capacity: utf8.count)
+                ptr.initialize(from: utf8, count: utf8.count)
+                allocations.append(ptr)
+                return UnsafePointer(ptr)
+            }
+            return try body(pointers)
+        }
+
+        let inputNames = Array(inputs.keys)
+        let outputNames = Array(outputs.keys)
+        try withCStringPointers(inputNames + outputNames) { namePtrs in
+            var inputBuffers: [trt_named_buffer] = []
+            inputBuffers.reserveCapacity(inputNames.count)
+            for (i, name) in inputNames.enumerated() {
+                guard let spec = inputs[name] else { continue }
+                guard spec.address != 0, spec.length > 0 else {
+                    throw TensorRTError.invalidBinding("Invalid device input buffer for \(name).")
+                }
+                let ptr = UnsafeRawPointer(bitPattern: UInt(spec.address))
+                inputBuffers.append(trt_named_buffer(name: namePtrs[i], data: ptr, size: spec.length))
+            }
+
+            var outputBuffers: [trt_named_mutable_buffer] = []
+            outputBuffers.reserveCapacity(outputNames.count)
+            let offset = inputNames.count
+            for (i, name) in outputNames.enumerated() {
+                guard let spec = outputs[name] else { continue }
+                guard spec.address != 0, spec.length > 0 else {
+                    throw TensorRTError.invalidBinding("Invalid device output buffer for \(name).")
+                }
+                let ptr = UnsafeMutableRawPointer(bitPattern: UInt(spec.address))
+                outputBuffers.append(trt_named_mutable_buffer(name: namePtrs[offset + i], data: ptr, size: spec.length))
+            }
+
+            let status = trt_context_execute_device(
+                ctx,
+                inputBuffers,
+                Int32(inputBuffers.count),
+                outputBuffers,
+                Int32(outputBuffers.count),
+                synchronously ? 1 : 0
+            )
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("TensorRT device enqueue failed (status \(status)).")
+            }
+        }
+#else
+        throw TensorRTError.notImplemented("enqueueDevice requires TensorRTNative on Linux")
+#endif
+    }
+
+    /// Records a CUDA event on this context's underlying stream.
+    ///
+    /// Use this to wait for completion without synchronizing the whole stream. This is most useful
+    /// with `ExecutionQueue.external` and `enqueueDevice(..., synchronously: false)`.
+    public func recordEvent(_ event: TensorRTSystem.CUDAEvent) async throws {
+#if canImport(TensorRTNative)
+        guard let plan = engine.serialized else {
+            throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
+        }
+        let ctx = try getOrCreateNativeContext(plan: plan)
+        let status = trt_context_record_event(ctx, event.rawValue)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to record event on context stream (status \(status)).")
+        }
+#else
+        throw TensorRTError.notImplemented("recordEvent requires TensorRTNative on Linux")
+#endif
+    }
+
     /// Selects the active optimization profile for the context.
     public func setOptimizationProfile(_ profile: OptimizationProfile) async throws {
-        throw TensorRTError.notImplemented("Optimization profile switching")
+        try await setOptimizationProfile(named: profile.name)
     }
 
     /// Selects the active optimization profile by name.
     public func setOptimizationProfile(named name: String) async throws {
-        throw TensorRTError.notImplemented("Optimization profile switching by name")
+#if canImport(TensorRTNative)
+        func parseIndex(_ raw: String) -> Int32? {
+            if let parsed = Int32(raw) {
+                return parsed
+            }
+            if raw.hasPrefix("profile") {
+                return Int32(raw.dropFirst("profile".count))
+            }
+            return nil
+        }
+
+        let index: Int32
+        if let position = engine.description.profileNames.firstIndex(of: name) {
+            index = Int32(position)
+        } else if let parsed = parseIndex(name) {
+            index = parsed
+        } else {
+            throw TensorRTError.missingOptimizationProfile("No optimization profile named '\(name)'; available: \(engine.description.profileNames)")
+        }
+
+        requestedProfileIndex = index
+        appliedProfileIndex = nil
+
+        if let plan = engine.serialized, let ctx = nativeContextHandle?.raw {
+            _ = plan
+            try applyOptimizationProfileIfNeeded(ctx: ctx)
+            try applyInputShapesIfNeeded(ctx: ctx)
+        }
+#else
+        throw TensorRTError.notImplemented("Optimization profile switching requires TensorRTNative on Linux")
+#endif
     }
 
     /// Reshapes input and output bindings for dynamic shapes.
@@ -1402,6 +1587,13 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
 
     public func deserializeEngine(from data: Data, configuration: EngineLoadConfiguration) throws -> Engine {
 #if canImport(TensorRTNative)
+        if configuration.initializePlugins {
+            try TensorRTSystem.initializePlugins()
+        }
+        for path in configuration.pluginLibraries {
+            try TensorRTSystem.loadPluginLibrary(path)
+        }
+
         let handle: UInt = data.withUnsafeBytes { bytes in
             trt_deserialize_engine(bytes.baseAddress, bytes.count)
         }
@@ -1420,6 +1612,18 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
         var outputs: [TensorBinding] = []
         inputs.reserveCapacity(Int(ioCount))
         outputs.reserveCapacity(Int(ioCount))
+
+        var profileCount: Int32 = 0
+        _ = trt_engine_get_profile_count(handle, &profileCount)
+        let profileNames: [String] = (0..<max(0, Int(profileCount))).map { String($0) }
+
+        var metadata: [String: String] = [:]
+        if let idx = configuration.profileIndex {
+            metadata["defaultProfileIndex"] = String(idx)
+        }
+        if let name = configuration.profile {
+            metadata["defaultProfileName"] = name
+        }
 
         func mapDataType(_ raw: Int32) throws -> TensorDataType {
             // nvinfer1::DataType values (stable across TensorRT versions):
@@ -1478,8 +1682,8 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
             workspaceSizeBytes: nil,
             device: configuration.device,
             profiles: [],
-            metadata: [:],
-            profileNames: [],
+            metadata: metadata,
+            profileNames: profileNames,
             planSizeBytes: data.count,
             computeCapability: nil,
             tacticSources: [],
@@ -1499,7 +1703,111 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
     }
 
     public func buildEngine(onnxURL: URL, options: EngineBuildOptions) throws -> Engine {
-        throw TensorRTError.notImplemented("Native ONNX build")
+#if canImport(TensorRTNative)
+        // NOTE: For now, build returns serialized plan bytes and we reuse deserializeEngine(...) to
+        // populate the IO description. This is double work but keeps the Swift surface small.
+        var rawPtr: UnsafeMutablePointer<UInt8>?
+        var size: Int = 0
+
+        let enableFp16: Int32 = options.precision.contains(.fp16) ? 1 : 0
+        let workspace = options.workspaceSizeBytes.map { max(0, $0) } ?? 0
+
+        func flattenProfileRanges() -> (names: [String], ranges: [trt_profile_binding_range], profileCount: Int32) {
+            guard !options.profiles.isEmpty else {
+                return ([], [], 0)
+            }
+
+            var names: [String] = []
+            var entries: [trt_profile_binding_range] = []
+            entries.reserveCapacity(options.profiles.reduce(0) { $0 + $1.bindingRanges.count })
+
+            for (profileIndex, profile) in options.profiles.enumerated() {
+                for (tensorName, range) in profile.bindingRanges {
+                    names.append(tensorName)
+
+                    var entry = trt_profile_binding_range()
+                    entry.profileIndex = Int32(profileIndex)
+                    entry.tensorName = nil
+                    entry.nbDims = Int32(range.min.rank)
+
+                    func fill(_ src: TensorShape, _ dst: UnsafeMutablePointer<Int32>) {
+                        for i in 0..<TensorShape.maxRank {
+                            dst[i] = (i < src.rank) ? src.dims[i] : 0
+                        }
+                    }
+
+                    withUnsafeMutablePointer(to: &entry.minDims) { ptr in
+                        ptr.withMemoryRebound(to: Int32.self, capacity: TensorShape.maxRank) { fill(range.min, $0) }
+                    }
+                    withUnsafeMutablePointer(to: &entry.optDims) { ptr in
+                        ptr.withMemoryRebound(to: Int32.self, capacity: TensorShape.maxRank) { fill(range.optimal, $0) }
+                    }
+                    withUnsafeMutablePointer(to: &entry.maxDims) { ptr in
+                        ptr.withMemoryRebound(to: Int32.self, capacity: TensorShape.maxRank) { fill(range.max, $0) }
+                    }
+
+                    entries.append(entry)
+                }
+            }
+
+            return (names, entries, Int32(options.profiles.count))
+        }
+
+        let flattened = flattenProfileRanges()
+        let status: Int32 = onnxURL.path.withCString { pathPtr in
+            func withCStringPointers<R>(_ strings: [String], _ body: ([UnsafePointer<CChar>]) throws -> R) rethrows -> R {
+                var allocations: [UnsafeMutablePointer<CChar>] = []
+                allocations.reserveCapacity(strings.count)
+                defer { allocations.forEach { $0.deallocate() } }
+
+                let pointers: [UnsafePointer<CChar>] = strings.map { string in
+                    let utf8 = Array(string.utf8CString)
+                    let ptr = UnsafeMutablePointer<CChar>.allocate(capacity: utf8.count)
+                    ptr.initialize(from: utf8, count: utf8.count)
+                    allocations.append(ptr)
+                    return UnsafePointer(ptr)
+                }
+                return try body(pointers)
+            }
+
+            return withCStringPointers(flattened.names) { namePtrs in
+                var ranges = flattened.ranges
+                for i in 0..<ranges.count {
+                    ranges[i].tensorName = namePtrs[i]
+                }
+                if ranges.isEmpty {
+                    return trt_build_engine_from_onnx_file(pathPtr, enableFp16, workspace, &rawPtr, &size)
+                }
+                return trt_build_engine_from_onnx_file_with_profiles(
+                    pathPtr,
+                    enableFp16,
+                    workspace,
+                    ranges,
+                    Int32(ranges.count),
+                    flattened.profileCount,
+                    &rawPtr,
+                    &size
+                )
+            }
+        }
+
+        guard status == 0, let rawPtr, size > 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to build engine from ONNX at \(onnxURL.path) (status \(status)).")
+        }
+        defer { trt_free(rawPtr) }
+
+        let plan = Data(bytes: rawPtr, count: size)
+        let loadConfig = EngineLoadConfiguration(
+            device: options.device,
+            logger: .standard,
+            allowRefit: options.allowRefit,
+            initializePlugins: true,
+            pluginLibraries: []
+        )
+        return try deserializeEngine(from: plan, configuration: loadConfig)
+#else
+        throw TensorRTError.notImplemented("Native ONNX build (TensorRTNative module unavailable)")
+#endif
     }
 }
 

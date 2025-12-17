@@ -28,6 +28,39 @@ public enum TensorRTSystem {
         )
     }
 
+    /// Initializes TensorRT's plugin registry.
+    ///
+    /// Many real-world TensorRT plans require plugins to be registered before deserialization.
+    /// This function is idempotent (safe to call multiple times).
+    public static func initializePlugins() throws {
+        let status = trt_plugins_initialize()
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("TensorRT plugin initialization failed (status \(status)).")
+        }
+    }
+
+    /// Loads a shared library that registers TensorRT plugins (e.g. custom layer plugins).
+    ///
+    /// The library handle is retained for the lifetime of the process.
+    public static func loadPluginLibrary(_ path: String) throws {
+        let status = path.withCString { cStr in
+            trt_plugins_load_library(cStr)
+        }
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to load TensorRT plugin library at \(path) (status \(status)).")
+        }
+    }
+
+    /// Returns the number of CUDA devices visible to the CUDA driver.
+    public static func cudaDeviceCount() throws -> Int {
+        var count: Int32 = 0
+        let status = trt_cuda_device_count(&count)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to query CUDA device count (status \(status)).")
+        }
+        return Int(count)
+    }
+
     /// Builds a small serialized FP32 engine plan for a trivial identity network.
     public static func buildIdentityEnginePlan(elementCount: Int = 8) throws -> Data {
         var rawPtr: UnsafeMutablePointer<UInt8>?
@@ -49,6 +82,32 @@ public enum TensorRTSystem {
         let status = trt_build_dynamic_identity_engine_f32(Int32(min), Int32(opt), Int32(max), &rawPtr, &size)
         guard status == 0, let rawPtr, size > 0 else {
             throw TensorRTError.notImplemented("Failed to build dynamic identity engine plan (status \(status)).")
+        }
+        defer { trt_free(rawPtr) }
+        return Data(bytes: rawPtr, count: size)
+    }
+
+    /// Builds a serialized FP32 identity engine plan with two optimization profiles.
+    ///
+    /// This is primarily intended for tests and early prototyping of runtime profile selection.
+    public static func buildDualProfileIdentityEnginePlanF32(
+        profile0: (min: Int, opt: Int, max: Int),
+        profile1: (min: Int, opt: Int, max: Int)
+    ) throws -> Data {
+        var rawPtr: UnsafeMutablePointer<UInt8>?
+        var size: Int = 0
+        let status = trt_build_dual_profile_identity_engine_f32(
+            Int32(profile0.min),
+            Int32(profile0.opt),
+            Int32(profile0.max),
+            Int32(profile1.min),
+            Int32(profile1.opt),
+            Int32(profile1.max),
+            &rawPtr,
+            &size
+        )
+        guard status == 0, let rawPtr, size > 0 else {
+            throw TensorRTError.notImplemented("Failed to build dual-profile identity engine plan (status \(status)).")
         }
         defer { trt_free(rawPtr) }
         return Data(bytes: rawPtr, count: size)
@@ -133,6 +192,47 @@ public enum TensorRTSystem {
 
         deinit {
             trt_destroy_builder(handle)
+        }
+    }
+
+    /// RAII wrapper around a CUDA event (CUDA Driver API).
+    public final class CUDAEvent: @unchecked Sendable {
+        public let rawValue: UInt64
+
+        public init() throws {
+            var ev: UInt64 = 0
+            let status = trt_cuda_event_create(&ev)
+            guard status == 0, ev != 0 else {
+                throw TensorRTError.runtimeUnavailable("Failed to create CUDA event (status \(status)).")
+            }
+            self.rawValue = ev
+        }
+
+        deinit {
+            _ = trt_cuda_event_destroy(rawValue)
+        }
+
+        public func record(on stream: UInt64) throws {
+            let status = trt_cuda_event_record(rawValue, stream)
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("Failed to record CUDA event (status \(status)).")
+            }
+        }
+
+        public func synchronize() throws {
+            let status = trt_cuda_event_synchronize(rawValue)
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("Failed to synchronize CUDA event (status \(status)).")
+            }
+        }
+
+        public func isReady() throws -> Bool {
+            var ready: Int32 = 0
+            let status = trt_cuda_event_query(rawValue, &ready)
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("Failed to query CUDA event (status \(status)).")
+            }
+            return ready != 0
         }
     }
 }
