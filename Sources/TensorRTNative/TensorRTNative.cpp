@@ -995,6 +995,108 @@ int trt_cuda_stream_synchronize(uint64_t stream) {
   return (cu == CUDA_SUCCESS) ? 0 : 3;
 }
 
+int trt_cuda_event_create(uint64_t* outEvent) {
+  if (!outEvent) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  CUevent ev = nullptr;
+  cu = cuEventCreate(&ev, CU_EVENT_DEFAULT);
+  if (cu != CUDA_SUCCESS) {
+    return 3;
+  }
+  *outEvent = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ev));
+  return 0;
+}
+
+int trt_cuda_event_destroy(uint64_t event) {
+  if (event == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuEventDestroy(reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)));
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_event_record(uint64_t event, uint64_t stream) {
+  if (event == 0 || stream == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuEventRecord(
+    reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)),
+    reinterpret_cast<CUstream>(static_cast<uintptr_t>(stream))
+  );
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_event_synchronize(uint64_t event) {
+  if (event == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuEventSynchronize(reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)));
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_event_query(uint64_t event, int32_t* outReady) {
+  if (event == 0 || !outReady) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuEventQuery(reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)));
+  if (cu == CUDA_SUCCESS) {
+    *outReady = 1;
+    return 0;
+  }
+  if (cu == CUDA_ERROR_NOT_READY) {
+    *outReady = 0;
+    return 0;
+  }
+  return 3;
+}
+
+int trt_context_record_event(uintptr_t ctxHandle, uint64_t event) {
+  if (!ctxHandle || event == 0) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  if (!ctx->stream) {
+    return 2;
+  }
+  CUresult cu = cuEventRecord(
+    reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)),
+    ctx->stream
+  );
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+#else
+  (void)ctxHandle;
+  (void)event;
+  return 100;
+#endif
+}
+
 int trt_cuda_free(uint64_t address) {
   if (address == 0) {
     return 1;
