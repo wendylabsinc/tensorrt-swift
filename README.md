@@ -62,7 +62,7 @@ import PackageDescription
 let package = Package(
     name: "MyApp",
     dependencies: [
-        .package(url: "https://github.com/wendylabsinc/tensorrt-swift", from: "0.0.1"),
+        .package(url: "https://github.com/wendylabsinc/tensorrt-swift", from: "0.0.2"),
     ],
     targets: [
         .executableTarget(
