@@ -2,10 +2,13 @@
 
 #include <cuda.h>
 #include <NvInfer.h>
+#include <NvInferPlugin.h>
 #include <NvInferVersion.h>
 
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -19,6 +22,19 @@ public:
 SilentLogger& logger() {
   static SilentLogger instance;
   return instance;
+}
+
+std::once_flag pluginsInitOnce;
+int pluginsInitStatus = -1;
+std::mutex pluginHandlesMutex;
+std::vector<void*> pluginHandles;
+
+void retainPluginHandle(void* handle) {
+  if (!handle) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(pluginHandlesMutex);
+  pluginHandles.push_back(handle);
 }
 
 template <typename T>
@@ -203,6 +219,41 @@ int trt_get_version(int* major, int* minor, int* patch, int* build) {
   *patch = getInferLibPatchVersion();
   *build = getInferLibBuildVersion();
   return (*major > 0) ? 0 : 2;
+}
+
+int trt_plugins_initialize(void) {
+  std::call_once(pluginsInitOnce, []() {
+    // Some TensorRT installs require the plugin library to be explicitly loaded
+    // before initLibNvInferPlugins can register built-in plugins.
+    void* handle = dlopen("libnvinfer_plugin.so", RTLD_NOW | RTLD_LOCAL);
+    if (handle) {
+      retainPluginHandle(handle);
+    }
+
+    bool ok = initLibNvInferPlugins(&logger(), "");
+    pluginsInitStatus = ok ? 0 : 1;
+  });
+
+  if (pluginsInitStatus < 0) {
+    return 2;
+  }
+  return pluginsInitStatus;
+}
+
+int trt_plugins_load_library(const char* path) {
+  if (!path || path[0] == '\0') {
+    return 1;
+  }
+
+  (void)trt_plugins_initialize();
+
+  void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  if (!handle) {
+    return 2;
+  }
+
+  retainPluginHandle(handle);
+  return 0;
 }
 
 uintptr_t trt_create_runtime(void) {
@@ -439,6 +490,7 @@ uintptr_t trt_deserialize_engine(const void* data, size_t size) {
   if (!data || size == 0) {
     return 0;
   }
+  (void)trt_plugins_initialize();
   nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(logger());
   if (!runtime) {
     return 0;

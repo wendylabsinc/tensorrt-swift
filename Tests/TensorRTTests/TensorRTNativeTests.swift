@@ -20,6 +20,25 @@ import TensorRTNative
     #expect(true)
 }
 
+@Test("TensorRT plugins initialize") func tensorRTPluginInitialization() async throws {
+    try TensorRTSystem.initializePlugins()
+    #expect(true)
+}
+
+@Test("Loading missing plugin library fails") func tensorRTPluginLoadMissingLibrary() async throws {
+    let missingPath = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tensorrt-swift-\(UUID().uuidString)")
+        .appendingPathComponent("libmissing.so")
+        .path
+
+    do {
+        try TensorRTSystem.loadPluginLibrary(missingPath)
+        #expect(false, "Expected loadPluginLibrary to throw for missing path: \(missingPath)")
+    } catch {
+        #expect(true)
+    }
+}
+
 @Test("Linked version matches probe when available") func tensorRTVersionConsistency() async throws {
     let linked = try TensorRTSystem.linkedRuntimeVersion()
     let probed = try TensorRTRuntimeProbe.inferRuntimeVersion()

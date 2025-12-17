@@ -28,6 +28,29 @@ public enum TensorRTSystem {
         )
     }
 
+    /// Initializes TensorRT's plugin registry.
+    ///
+    /// Many real-world TensorRT plans require plugins to be registered before deserialization.
+    /// This function is idempotent (safe to call multiple times).
+    public static func initializePlugins() throws {
+        let status = trt_plugins_initialize()
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("TensorRT plugin initialization failed (status \(status)).")
+        }
+    }
+
+    /// Loads a shared library that registers TensorRT plugins (e.g. custom layer plugins).
+    ///
+    /// The library handle is retained for the lifetime of the process.
+    public static func loadPluginLibrary(_ path: String) throws {
+        let status = path.withCString { cStr in
+            trt_plugins_load_library(cStr)
+        }
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to load TensorRT plugin library at \(path) (status \(status)).")
+        }
+    }
+
     /// Builds a small serialized FP32 engine plan for a trivial identity network.
     public static func buildIdentityEnginePlan(elementCount: Int = 8) throws -> Data {
         var rawPtr: UnsafeMutablePointer<UInt8>?

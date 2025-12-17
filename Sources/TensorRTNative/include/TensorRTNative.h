@@ -10,6 +10,15 @@ extern "C" {
 // Returns 0 on success, non-zero on failure.
 int trt_get_version(int* major, int* minor, int* patch, int* build);
 
+// Plugin registration/loading helpers.
+// Many real TensorRT plans require plugin registration before deserialization.
+// Returns 0 on success.
+int trt_plugins_initialize(void);
+// Loads a TensorRT plugin shared library (e.g. custom plugins).
+// The library handle is intentionally retained for the lifetime of the process.
+// Returns 0 on success.
+int trt_plugins_load_library(const char* path);
+
 // Creates/destroys a TensorRT runtime (nvinfer1::IRuntime).
 // Returns 0 on failure.
 uintptr_t trt_create_runtime(void);

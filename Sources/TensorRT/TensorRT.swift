@@ -539,13 +539,25 @@ public struct EngineLoadConfiguration: Sendable {
     public var device: DeviceSelection
     public var logger: Logger
     public var allowRefit: Bool
+    public var initializePlugins: Bool
+    public var pluginLibraries: [String]
 
-    public init(profile: String? = nil, profileIndex: Int? = nil, device: DeviceSelection = DeviceSelection(), logger: Logger = .standard, allowRefit: Bool = false) {
+    public init(
+        profile: String? = nil,
+        profileIndex: Int? = nil,
+        device: DeviceSelection = DeviceSelection(),
+        logger: Logger = .standard,
+        allowRefit: Bool = false,
+        initializePlugins: Bool = true,
+        pluginLibraries: [String] = []
+    ) {
         self.profile = profile
         self.profileIndex = profileIndex
         self.device = device
         self.logger = logger
         self.allowRefit = allowRefit
+        self.initializePlugins = initializePlugins
+        self.pluginLibraries = pluginLibraries
     }
 }
 
@@ -1504,6 +1516,13 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
 
     public func deserializeEngine(from data: Data, configuration: EngineLoadConfiguration) throws -> Engine {
 #if canImport(TensorRTNative)
+        if configuration.initializePlugins {
+            try TensorRTSystem.initializePlugins()
+        }
+        for path in configuration.pluginLibraries {
+            try TensorRTSystem.loadPluginLibrary(path)
+        }
+
         let handle: UInt = data.withUnsafeBytes { bytes in
             trt_deserialize_engine(bytes.baseAddress, bytes.count)
         }
