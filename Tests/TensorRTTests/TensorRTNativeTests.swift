@@ -1,4 +1,5 @@
 import Testing
+import FoundationEssentials
 @testable import TensorRT
 
 #if canImport(TensorRTNative)
@@ -36,7 +37,39 @@ import Testing
     #expect(engine.description.outputs.first?.name == "output")
 
     let input: [Float] = (0..<8).map(Float.init)
-    let output = try TensorRTSystem.runIdentityPlanF32(plan: plan, input: input)
+    let inputData = input.withUnsafeBufferPointer { buffer in
+        Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+    }
+
+    let context = try engine.makeExecutionContext()
+    let inputDescriptor = engine.description.inputs[0].descriptor
+
+    let batch = InferenceBatch(
+        inputs: [
+            "input": TensorValue(descriptor: inputDescriptor, storage: .host(inputData)),
+        ]
+    )
+
+    let result = try await context.enqueue(batch, synchronously: true)
+    guard let outputValue = result.outputs["output"] else {
+        throw TensorRTError.invalidBinding("Missing output tensor")
+    }
+
+    let outputData: Data
+    switch outputValue.storage {
+    case .host(let data):
+        outputData = data
+    default:
+        throw TensorRTError.notImplemented("Expected host output from identity inference")
+    }
+
+    var output = [Float](repeating: 0, count: input.count)
+    output.withUnsafeMutableBytes { outBytes in
+        outputData.withUnsafeBytes { inBytes in
+            outBytes.copyBytes(from: inBytes.prefix(outBytes.count))
+        }
+    }
+
     #expect(output == input)
 }
 

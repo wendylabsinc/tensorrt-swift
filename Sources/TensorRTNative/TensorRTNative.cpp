@@ -6,6 +6,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace {
 class SilentLogger final : public nvinfer1::ILogger {
@@ -309,6 +310,147 @@ int trt_engine_get_io_desc(uintptr_t engine, int32_t index, trt_io_tensor_desc* 
   outDesc->isInput = ptr->bindingIsInput(index) ? 1 : 0;
   return 0;
 #endif
+}
+
+int trt_execute_plan_host(
+  const void* plan,
+  size_t planSize,
+  const trt_named_buffer* inputs,
+  int32_t inputCount,
+  const trt_named_mutable_buffer* outputs,
+  int32_t outputCount
+) {
+  if (!plan || planSize == 0 || !inputs || inputCount < 0 || !outputs || outputCount < 0) {
+    return 1;
+  }
+
+  CUcontext ctx;
+  CUresult cu = ensureCudaPrimaryContext(&ctx);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+
+  CUstream stream;
+  cu = cuStreamCreate(&stream, CU_STREAM_DEFAULT);
+  if (cu != CUDA_SUCCESS) {
+    return 3;
+  }
+
+  uintptr_t engineHandle = trt_deserialize_engine(plan, planSize);
+  if (!engineHandle) {
+    cuStreamDestroy(stream);
+    return 4;
+  }
+  auto* engine = reinterpret_cast<nvinfer1::ICudaEngine*>(engineHandle);
+
+  nvinfer1::IExecutionContext* exec = engine->createExecutionContext();
+  if (!exec) {
+    trt_destroy_engine(engineHandle);
+    cuStreamDestroy(stream);
+    return 5;
+  }
+
+  // Allocate per-input/output device buffers and set addresses.
+  // This is intentionally conservative and assumes the caller provides correct byte sizes.
+  // Future work: introspect engine sizes and validate.
+  std::vector<CUdeviceptr> allocations;
+  allocations.reserve(static_cast<size_t>(inputCount) + static_cast<size_t>(outputCount));
+
+  auto fail = [&](int code) -> int {
+    for (CUdeviceptr ptr : allocations) {
+      if (ptr) {
+        cuMemFree(ptr);
+      }
+    }
+    trtDestroy(exec);
+    trt_destroy_engine(engineHandle);
+    cuStreamDestroy(stream);
+    return code;
+  };
+
+  for (int32_t i = 0; i < inputCount; i++) {
+    auto const& in = inputs[i];
+    if (!in.name || !in.data || in.size == 0) {
+      return fail(6);
+    }
+
+    CUdeviceptr dptr = 0;
+    cu = cuMemAlloc(&dptr, in.size);
+    if (cu != CUDA_SUCCESS) {
+      return fail(7);
+    }
+    allocations.push_back(dptr);
+
+    cu = cuMemcpyHtoDAsync(dptr, in.data, in.size, stream);
+    if (cu != CUDA_SUCCESS) {
+      return fail(8);
+    }
+
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+    if (!exec->setTensorAddress(in.name, reinterpret_cast<void*>(dptr))) {
+      return fail(9);
+    }
+#else
+    // Not supported in this minimal shim for TRT < 10.
+    return fail(100);
+#endif
+  }
+
+  for (int32_t i = 0; i < outputCount; i++) {
+    auto const& out = outputs[i];
+    if (!out.name || !out.data || out.size == 0) {
+      return fail(10);
+    }
+
+    CUdeviceptr dptr = 0;
+    cu = cuMemAlloc(&dptr, out.size);
+    if (cu != CUDA_SUCCESS) {
+      return fail(11);
+    }
+    allocations.push_back(dptr);
+
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+    if (!exec->setTensorAddress(out.name, reinterpret_cast<void*>(dptr))) {
+      return fail(12);
+    }
+#else
+    return fail(100);
+#endif
+  }
+
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  if (!exec->enqueueV3(reinterpret_cast<cudaStream_t>(stream))) {
+    return fail(13);
+  }
+#else
+  return fail(100);
+#endif
+
+  // Copy outputs back to host. Output device allocations are after input allocations.
+  int32_t outputBase = inputCount;
+  for (int32_t i = 0; i < outputCount; i++) {
+    auto const& out = outputs[i];
+    CUdeviceptr dptr = allocations[static_cast<size_t>(outputBase + i)];
+    cu = cuMemcpyDtoHAsync(out.data, dptr, out.size, stream);
+    if (cu != CUDA_SUCCESS) {
+      return fail(14);
+    }
+  }
+
+  cu = cuStreamSynchronize(stream);
+  if (cu != CUDA_SUCCESS) {
+    return fail(15);
+  }
+
+  for (CUdeviceptr ptr : allocations) {
+    if (ptr) {
+      cuMemFree(ptr);
+    }
+  }
+  trtDestroy(exec);
+  trt_destroy_engine(engineHandle);
+  cuStreamDestroy(stream);
+  return 0;
 }
 
 int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* input, int32_t elementCount, float* output) {

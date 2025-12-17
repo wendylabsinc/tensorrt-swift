@@ -611,7 +611,7 @@ public struct Engine: Sendable {
         queue: ExecutionQueue = .automatic,
         allocator: MemoryAllocator = .default
     ) throws -> ExecutionContext {
-        throw TensorRTError.notImplemented("Execution context creation")
+        ExecutionContext(engine: self, queue: queue, allocator: allocator)
     }
 }
 
@@ -690,7 +690,151 @@ public actor ExecutionContext: ExecutionContexting {
         _ batch: InferenceBatch,
         synchronously: Bool = true
     ) async throws -> InferenceResult {
-        throw TensorRTError.notImplemented("Inference enqueue")
+#if canImport(TensorRTNative)
+        guard let plan = engine.serialized else {
+            throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
+        }
+
+        let inputBindings = engine.description.inputs
+        let outputBindings = engine.description.outputs
+
+        // Keep input Data alive for the duration of the native call.
+        let inputPairs: [(name: String, data: Data)] = try inputBindings.map { binding in
+            guard let value = batch.inputs[binding.name] else {
+                throw TensorRTError.invalidBinding("Missing required input \(binding.name)")
+            }
+            guard value.descriptor.name == binding.name else {
+                throw TensorRTError.invalidBinding("Mismatched input descriptor for \(binding.name)")
+            }
+
+            switch value.storage {
+            case .host(let data):
+                return (binding.name, data)
+            case .deferred(let thunk):
+                return (binding.name, thunk())
+            default:
+                throw TensorRTError.notImplemented("Only host-backed TensorValue inputs are supported in enqueue() for now.")
+            }
+        }
+
+        // Prepare output buffers.
+        let outputPairs: [(name: String, data: Data)] = try outputBindings.map { binding in
+            let desc = binding.descriptor
+            guard !desc.shape.isDynamic else {
+                throw TensorRTError.invalidShapeRange("Output \(binding.name) has dynamic shape; call reshape() once implemented.")
+            }
+            let size = desc.shape.elementCount * desc.dataType.byteCount
+            return (binding.name, Data(count: size))
+        }
+
+        let inputCount = Int32(inputPairs.count)
+        let outputCount = Int32(outputPairs.count)
+
+        func withCStringPointers<R>(_ strings: [String], _ body: ([UnsafePointer<CChar>]) throws -> R) rethrows -> R {
+            var allocations: [UnsafeMutablePointer<CChar>] = []
+            allocations.reserveCapacity(strings.count)
+            defer { allocations.forEach { $0.deallocate() } }
+
+            let pointers: [UnsafePointer<CChar>] = strings.map { string in
+                let utf8 = Array(string.utf8CString)
+                let ptr = UnsafeMutablePointer<CChar>.allocate(capacity: utf8.count)
+                ptr.initialize(from: utf8, count: utf8.count)
+                allocations.append(ptr)
+                return UnsafePointer(ptr)
+            }
+
+            return try body(pointers)
+        }
+
+        func withInputPointers<R>(
+            _ pairs: [(name: String, data: Data)],
+            _ index: Int,
+            _ pointers: inout [UnsafeRawPointer?],
+            _ body: ([UnsafeRawPointer?]) throws -> R
+        ) rethrows -> R {
+            if index == pairs.count {
+                return try body(pointers)
+            }
+            return try pairs[index].data.withUnsafeBytes { raw in
+                pointers.append(raw.baseAddress)
+                defer { pointers.removeLast() }
+                return try withInputPointers(pairs, index + 1, &pointers, body)
+            }
+        }
+
+        func withOutputPointers<R>(
+            _ index: Int,
+            _ pairs: inout [(name: String, data: Data)],
+            _ pointers: inout [UnsafeMutableRawPointer?],
+            _ body: (inout [(name: String, data: Data)], [UnsafeMutableRawPointer?]) throws -> R
+        ) rethrows -> R {
+            if index == pairs.count {
+                return try body(&pairs, pointers)
+            }
+            var data = pairs[index].data
+            let result = try data.withUnsafeMutableBytes { raw in
+                pointers.append(raw.baseAddress)
+                defer { pointers.removeLast() }
+                return try withOutputPointers(index + 1, &pairs, &pointers, body)
+            }
+            pairs[index].data = data
+            return result
+        }
+
+        func execute(plan: Data, inputPairs: [(name: String, data: Data)], outputPairs: inout [(name: String, data: Data)]) throws -> Int32 {
+            try withCStringPointers(inputPairs.map(\.name) + outputPairs.map(\.name)) { namePtrs in
+                var inputPointers: [UnsafeRawPointer?] = []
+                inputPointers.reserveCapacity(inputPairs.count)
+
+                return try withInputPointers(inputPairs, 0, &inputPointers) { inPtrs in
+                    var outputPointers: [UnsafeMutableRawPointer?] = []
+                    outputPointers.reserveCapacity(outputPairs.count)
+
+                    return try withOutputPointers(0, &outputPairs, &outputPointers) { pairs, outPtrs in
+                        var inputs: [trt_named_buffer] = []
+                        inputs.reserveCapacity(inputPairs.count)
+                        for i in 0..<inputPairs.count {
+                            inputs.append(trt_named_buffer(name: namePtrs[i], data: inPtrs[i], size: inputPairs[i].data.count))
+                        }
+
+                        var outputs: [trt_named_mutable_buffer] = []
+                        outputs.reserveCapacity(pairs.count)
+                        let outputNameOffset = inputPairs.count
+                        for i in 0..<pairs.count {
+                            outputs.append(trt_named_mutable_buffer(name: namePtrs[outputNameOffset + i], data: outPtrs[i], size: pairs[i].data.count))
+                        }
+
+                        return plan.withUnsafeBytes { planBytes in
+                            trt_execute_plan_host(
+                                planBytes.baseAddress,
+                                planBytes.count,
+                                inputs,
+                                inputCount,
+                                outputs,
+                                outputCount
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        var mutableOutputs = outputPairs
+        let status = try execute(plan: plan, inputPairs: inputPairs, outputPairs: &mutableOutputs)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("TensorRT enqueue failed (status \(status)).")
+        }
+
+        let outputs: [String: TensorValue] = outputBindings.reduce(into: [:]) { dict, binding in
+            if let item = mutableOutputs.first(where: { $0.name == binding.name }) {
+                dict[binding.name] = TensorValue(descriptor: binding.descriptor, storage: .host(item.data))
+            }
+        }
+
+        return InferenceResult(outputs: outputs, duration: nil, metadata: [:], profileUsed: batch.profileName)
+#else
+        throw TensorRTError.notImplemented("Inference enqueue requires TensorRTNative on Linux")
+#endif
     }
 
     /// Selects the active optimization profile for the context.

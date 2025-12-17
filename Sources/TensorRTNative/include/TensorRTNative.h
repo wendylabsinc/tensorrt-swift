@@ -48,6 +48,30 @@ typedef struct trt_io_tensor_desc {
 int trt_engine_get_io_count(uintptr_t engine, int32_t* outCount);
 int trt_engine_get_io_desc(uintptr_t engine, int32_t index, trt_io_tensor_desc* outDesc);
 
+typedef struct trt_named_buffer {
+  char const* name;
+  void const* data;
+  size_t size;
+} trt_named_buffer;
+
+typedef struct trt_named_mutable_buffer {
+  char const* name;
+  void* data;
+  size_t size;
+} trt_named_mutable_buffer;
+
+// Executes a serialized plan by copying host inputs to device, enqueueing, and copying outputs back to host.
+// The caller must provide output buffers of sufficient size.
+// Returns 0 on success.
+int trt_execute_plan_host(
+  const void* plan,
+  size_t planSize,
+  const trt_named_buffer* inputs,
+  int32_t inputCount,
+  const trt_named_mutable_buffer* outputs,
+  int32_t outputCount
+);
+
 // Runs the identity plan on GPU using CUDA driver API.
 // Returns 0 on success.
 int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* input, int32_t elementCount, float* output);
