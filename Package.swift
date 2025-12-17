@@ -13,7 +13,23 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "TensorRT"
+            name: "TensorRTNative",
+            publicHeadersPath: "include",
+            cxxSettings: [
+                .unsafeFlags(["-std=c++17"], .when(platforms: [.linux])),
+                .unsafeFlags(["-I/usr/local/cuda/include"], .when(platforms: [.linux])),
+            ],
+            linkerSettings: [
+                .linkedLibrary("nvinfer", .when(platforms: [.linux])),
+                .linkedLibrary("cuda", .when(platforms: [.linux])),
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+            ]
+        ),
+        .target(
+            name: "TensorRT",
+            dependencies: [
+                .target(name: "TensorRTNative", condition: .when(platforms: [.linux])),
+            ]
         ),
         .testTarget(
             name: "TensorRTTests",

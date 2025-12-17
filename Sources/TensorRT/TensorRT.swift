@@ -1,5 +1,9 @@
 import FoundationEssentials
 
+#if canImport(TensorRTNative)
+import TensorRTNative
+#endif
+
 /// Swift-first API scaffolding for working with NVIDIA TensorRT engines on Jetson-class devices.
 ///
 /// The API favors value types, Sendable actors, and concise builders so it can be used from
@@ -853,7 +857,93 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
     public init() {}
 
     public func deserializeEngine(from data: Data, configuration: EngineLoadConfiguration) throws -> Engine {
-        throw TensorRTError.notImplemented("Native engine deserialization")
+#if canImport(TensorRTNative)
+        let handle: UInt = data.withUnsafeBytes { bytes in
+            trt_deserialize_engine(bytes.baseAddress, bytes.count)
+        }
+
+        guard handle != 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to deserialize engine via libnvinfer.")
+        }
+        defer { trt_destroy_engine(handle) }
+
+        var ioCount: Int32 = 0
+        guard trt_engine_get_io_count(handle, &ioCount) == 0, ioCount > 0 else {
+            throw TensorRTError.runtimeUnavailable("Engine IO introspection failed.")
+        }
+
+        var inputs: [TensorBinding] = []
+        var outputs: [TensorBinding] = []
+        inputs.reserveCapacity(Int(ioCount))
+        outputs.reserveCapacity(Int(ioCount))
+
+        func mapDataType(_ raw: Int32) throws -> TensorDataType {
+            // nvinfer1::DataType values (stable across TensorRT versions):
+            // kFLOAT=0, kHALF=1, kINT8=2, kINT32=3, kBOOL=4, kUINT8=5, kFP8=6, kBF16=7, kINT64=8, kINT4=9.
+            switch raw {
+            case 0: return .float32
+            case 1: return .float16
+            case 2: return .int8
+            case 3: return .int32
+            case 4: return .boolean
+            case 7: return .bfloat16
+            case 8: return .int64
+            case 9: return .int4
+            default:
+                throw TensorRTError.unsupportedPrecision("Unsupported TensorRT DataType raw value \(raw)")
+            }
+        }
+
+        for index in 0..<ioCount {
+            var desc = trt_io_tensor_desc()
+            guard trt_engine_get_io_desc(handle, index, &desc) == 0 else {
+                throw TensorRTError.runtimeUnavailable("Engine IO desc lookup failed at index \(index).")
+            }
+
+            let name = withUnsafePointer(to: &desc.name) { ptr in
+                ptr.withMemoryRebound(to: CChar.self, capacity: Int(TRT_MAX_NAME)) { cStr in
+                    String(cString: cStr)
+                }
+            }
+
+            let nbDims = Int(desc.nbDims)
+            let dims: [Int] = withUnsafeBytes(of: &desc.dims) { raw in
+                let buffer = raw.bindMemory(to: Int32.self)
+                return buffer.prefix(max(0, nbDims)).map(Int.init)
+            }
+            let shape = TensorShape(dims)
+            let dtype = try mapDataType(desc.dataType)
+
+            let descriptor = TensorDescriptor(name: name, shape: shape, dataType: dtype, format: .linear)
+            let role: TensorBinding.Role = (desc.isInput == 1) ? .input : .output
+            let binding = TensorBinding(descriptor: descriptor, location: .device, role: role)
+            switch role {
+            case .input: inputs.append(binding)
+            case .output: outputs.append(binding)
+            }
+        }
+
+        let description = EngineDescription(
+            inputs: inputs,
+            outputs: outputs,
+            precision: [.fp32],
+            workspaceSizeBytes: nil,
+            device: configuration.device,
+            profiles: [],
+            metadata: [:],
+            profileNames: [],
+            planSizeBytes: data.count,
+            computeCapability: nil,
+            tacticSources: [],
+            supportsRefit: false,
+            supportsCUDAStreamCapture: true,
+            supportsTF32: false
+        )
+
+        return Engine(description: description, serialized: data, nativeHandle: nil)
+#else
+        throw TensorRTError.notImplemented("Native engine deserialization (TensorRTNative module unavailable)")
+#endif
     }
 
     public func buildEngine(from network: NetworkDefinition, options: EngineBuildOptions) throws -> Engine {
