@@ -1,5 +1,8 @@
 # TensorRT Swift (Linux)
 
+![Swift 6.2+](https://img.shields.io/badge/Swift-6.2%2B-orange)
+![Linux](https://img.shields.io/badge/Platform-Linux-blue)
+
 Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT engines on Linux.
 
 This repository is **work in progress** and **subject to breaking changes** (including major public
