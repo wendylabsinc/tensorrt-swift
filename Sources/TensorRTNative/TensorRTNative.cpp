@@ -317,6 +317,119 @@ int trt_build_identity_engine_f32(int32_t elementCount, uint8_t** outData, size_
   return 0;
 }
 
+int trt_build_dynamic_identity_engine_f32(int32_t min, int32_t opt, int32_t max, uint8_t** outData, size_t* outSize) {
+  if (!outData || !outSize || min <= 0 || opt <= 0 || max <= 0 || min > opt || opt > max) {
+    return 1;
+  }
+
+  *outData = nullptr;
+  *outSize = 0;
+
+  nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(logger());
+  if (!builder) {
+    return 2;
+  }
+
+  uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+  nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
+  if (!network) {
+    trtDestroy(builder);
+    return 3;
+  }
+
+  nvinfer1::Dims inputDims;
+  inputDims.nbDims = 1;
+  inputDims.d[0] = -1;
+  auto* input = network->addInput("input", nvinfer1::DataType::kFLOAT, inputDims);
+  if (!input) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 4;
+  }
+
+  auto* identity = network->addIdentity(*input);
+  if (!identity) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 5;
+  }
+
+  auto* out = identity->getOutput(0);
+  if (!out) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 6;
+  }
+  out->setName("output");
+  network->markOutput(*out);
+
+  nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
+  if (!config) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 7;
+  }
+
+  config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1U << 20);
+
+  nvinfer1::IOptimizationProfile* profile = builder->createOptimizationProfile();
+  if (!profile) {
+    trtDestroy(config);
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 8;
+  }
+
+  nvinfer1::Dims dmin;
+  dmin.nbDims = 1;
+  dmin.d[0] = min;
+  nvinfer1::Dims dopt;
+  dopt.nbDims = 1;
+  dopt.d[0] = opt;
+  nvinfer1::Dims dmax;
+  dmax.nbDims = 1;
+  dmax.d[0] = max;
+
+  bool ok = true;
+  ok = ok && profile->setDimensions("input", nvinfer1::OptProfileSelector::kMIN, dmin);
+  ok = ok && profile->setDimensions("input", nvinfer1::OptProfileSelector::kOPT, dopt);
+  ok = ok && profile->setDimensions("input", nvinfer1::OptProfileSelector::kMAX, dmax);
+  if (!ok) {
+    trtDestroy(config);
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 9;
+  }
+
+  if (config->addOptimizationProfile(profile) < 0) {
+    trtDestroy(config);
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 10;
+  }
+
+  nvinfer1::IHostMemory* serialized = builder->buildSerializedNetwork(*network, *config);
+  trtDestroy(config);
+  trtDestroy(network);
+  trtDestroy(builder);
+
+  if (!serialized || !serialized->data() || serialized->size() == 0) {
+    trtDestroy(serialized);
+    return 11;
+  }
+
+  void* buffer = std::malloc(serialized->size());
+  if (!buffer) {
+    trtDestroy(serialized);
+    return 12;
+  }
+  std::memcpy(buffer, serialized->data(), serialized->size());
+  *outData = reinterpret_cast<uint8_t*>(buffer);
+  *outSize = serialized->size();
+  trtDestroy(serialized);
+  return 0;
+}
+
 void trt_free(void* ptr) {
   std::free(ptr);
 }
@@ -693,6 +806,58 @@ int trt_context_execute_host(
   (void)inputCount;
   (void)outputs;
   (void)outputCount;
+  return 100;
+#endif
+}
+
+int trt_context_set_input_shape(uintptr_t ctxHandle, const char* inputName, const int32_t* dims, int32_t nbDims) {
+  if (!ctxHandle || !inputName || !dims || nbDims <= 0) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  if (!ctx->exec) {
+    return 2;
+  }
+
+  nvinfer1::Dims d;
+  d.nbDims = nbDims;
+  for (int32_t i = 0; i < nbDims && i < nvinfer1::Dims::MAX_DIMS; i++) {
+    d.d[i] = dims[i];
+  }
+  if (!ctx->exec->setInputShape(inputName, d)) {
+    return 3;
+  }
+  return 0;
+#else
+  (void)ctxHandle;
+  (void)inputName;
+  (void)dims;
+  (void)nbDims;
+  return 100;
+#endif
+}
+
+int trt_context_get_tensor_shape(uintptr_t ctxHandle, const char* tensorName, int32_t* outDims, int32_t maxDims, int32_t* outNbDims) {
+  if (!ctxHandle || !tensorName || !outDims || !outNbDims || maxDims <= 0) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  if (!ctx->exec) {
+    return 2;
+  }
+  nvinfer1::Dims d = ctx->exec->getTensorShape(tensorName);
+  if (!fillDims(outDims, maxDims, d, outNbDims)) {
+    return 3;
+  }
+  return 0;
+#else
+  (void)ctxHandle;
+  (void)tensorName;
+  (void)outDims;
+  (void)maxDims;
+  (void)outNbDims;
   return 100;
 #endif
 }
