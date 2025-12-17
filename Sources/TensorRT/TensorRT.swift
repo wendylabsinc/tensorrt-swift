@@ -58,22 +58,62 @@ public enum TensorRTError: LocalizedError, Sendable {
 
 /// Describes a tensor's dimensions.
 public struct TensorShape: Hashable, Sendable {
-    public var dimensions: [Int]
+    public static let maxRank = 8
+
+    public var rank: Int
+    public typealias InlineDims = [8 of Int32]
+    public var dims: InlineDims
 
     /// Creates a tensor shape with explicit dimensions. Use non-positive values to represent
     /// dynamic axes (for example, `0` or `-1` for dynamic batch size).
     public init(_ dimensions: [Int]) {
-        self.dimensions = dimensions
+        self.rank = min(Self.maxRank, dimensions.count)
+        self.dims = InlineDims(repeating: 0)
+        for index in 0..<rank {
+            self.dims[index] = Int32(dimensions[index])
+        }
+    }
+
+    public init(rank: Int, dims: InlineDims) {
+        self.rank = min(Self.maxRank, max(0, rank))
+        self.dims = dims
     }
 
     /// Total element count assuming dynamic axes are materialized.
     public var elementCount: Int {
-        dimensions.reduce(1, *)
+        guard !isDynamic else { return 0 }
+        var product = 1
+        for index in 0..<rank {
+            product *= Int(dims[index])
+        }
+        return product
     }
 
     /// Returns true when any axis is marked as dynamic.
     public var isDynamic: Bool {
-        dimensions.contains(where: { $0 <= 0 })
+        for index in 0..<rank where dims[index] <= 0 {
+            return true
+        }
+        return false
+    }
+
+    public var dimensions: [Int] {
+        (0..<rank).map { Int(dims[$0]) }
+    }
+
+    public static func == (lhs: TensorShape, rhs: TensorShape) -> Bool {
+        guard lhs.rank == rhs.rank else { return false }
+        for index in 0..<TensorShape.maxRank {
+            if lhs.dims[index] != rhs.dims[index] { return false }
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(rank)
+        for index in 0..<TensorShape.maxRank {
+            hasher.combine(dims[index])
+        }
     }
 }
 
@@ -1051,11 +1091,15 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
             }
 
             let nbDims = Int(desc.nbDims)
-            let dims: [Int] = withUnsafeBytes(of: &desc.dims) { raw in
+            let shape: TensorShape = withUnsafeBytes(of: &desc.dims) { raw in
                 let buffer = raw.bindMemory(to: Int32.self)
-                return buffer.prefix(max(0, nbDims)).map(Int.init)
+                var inline = TensorShape.InlineDims(repeating: 0)
+                let count = min(TensorShape.maxRank, max(0, nbDims))
+                for index in 0..<count {
+                    inline[index] = buffer[index]
+                }
+                return TensorShape(rank: count, dims: inline)
             }
-            let shape = TensorShape(dims)
             let dtype = try mapDataType(desc.dataType)
 
             let descriptor = TensorDescriptor(name: name, shape: shape, dataType: dtype, format: .linear)
