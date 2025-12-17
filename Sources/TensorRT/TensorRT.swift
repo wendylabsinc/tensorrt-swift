@@ -789,12 +789,44 @@ public actor ExecutionContext: ExecutionContexting {
     public let engine: Engine
     public let queue: ExecutionQueue
     public let allocator: MemoryAllocator
+    private var nativeContextHandle: NativeContextHandle?
 
     public init(engine: Engine, queue: ExecutionQueue, allocator: MemoryAllocator = .default) {
         self.engine = engine
         self.queue = queue
         self.allocator = allocator
     }
+
+    private final class NativeContextHandle: @unchecked Sendable {
+#if canImport(TensorRTNative)
+        let raw: UInt
+
+        init(raw: UInt) {
+            self.raw = raw
+        }
+
+        deinit {
+            trt_context_destroy(raw)
+        }
+#endif
+    }
+
+#if canImport(TensorRTNative)
+    private func getOrCreateNativeContext(plan: Data) throws -> UInt {
+        if let existing = nativeContextHandle?.raw {
+            return existing
+        }
+
+        let handle: UInt = plan.withUnsafeBytes { bytes in
+            trt_context_create(bytes.baseAddress, bytes.count)
+        }
+        guard handle != 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to create persistent TensorRT execution context.")
+        }
+        nativeContextHandle = NativeContextHandle(raw: handle)
+        return handle
+    }
+#endif
 
     /// Schedules a batch for execution. When `synchronously` is true, this awaits completion before returning.
     public func enqueue(
@@ -915,16 +947,8 @@ public actor ExecutionContext: ExecutionContexting {
                             outputs.append(trt_named_mutable_buffer(name: namePtrs[outputNameOffset + i], data: outPtrs[i], size: pairs[i].data.count))
                         }
 
-                        return plan.withUnsafeBytes { planBytes in
-                            trt_execute_plan_host(
-                                planBytes.baseAddress,
-                                planBytes.count,
-                                inputs,
-                                inputCount,
-                                outputs,
-                                outputCount
-                            )
-                        }
+                        let ctx = try getOrCreateNativeContext(plan: plan)
+                        return trt_context_execute_host(ctx, inputs, inputCount, outputs, outputCount)
                     }
                 }
             }
@@ -1027,18 +1051,10 @@ public actor ExecutionContext: ExecutionContexting {
                             size: outBuf.count * MemoryLayout<Float>.stride
                         )
 
-                        return plan.withUnsafeBytes { planBytes in
-                            withUnsafePointer(to: &inputBuffer) { inputPtr in
-                                withUnsafePointer(to: &outputBuffer) { outputPtr in
-                                    trt_execute_plan_host(
-                                        planBytes.baseAddress,
-                                        planBytes.count,
-                                        inputPtr,
-                                        1,
-                                        outputPtr,
-                                        1
-                                    )
-                                }
+                        let ctx = try getOrCreateNativeContext(plan: plan)
+                        return withUnsafePointer(to: &inputBuffer) { inputPtr in
+                            withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                trt_context_execute_host(ctx, inputPtr, 1, outputPtr, 1)
                             }
                         }
                     }
@@ -1123,18 +1139,10 @@ public actor ExecutionContext: ExecutionContexting {
                             size: outBuf.count
                         )
 
-                        return plan.withUnsafeBytes { planBytes in
-                            withUnsafePointer(to: &inputBuffer) { inputPtr in
-                                withUnsafePointer(to: &outputBuffer) { outputPtr in
-                                    trt_execute_plan_host(
-                                        planBytes.baseAddress,
-                                        planBytes.count,
-                                        inputPtr,
-                                        1,
-                                        outputPtr,
-                                        1
-                                    )
-                                }
+                        let ctx = try getOrCreateNativeContext(plan: plan)
+                        return withUnsafePointer(to: &inputBuffer) { inputPtr in
+                            withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                trt_context_execute_host(ctx, inputPtr, 1, outputPtr, 1)
                             }
                         }
                     }

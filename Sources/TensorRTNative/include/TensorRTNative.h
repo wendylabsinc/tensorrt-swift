@@ -72,6 +72,22 @@ int trt_execute_plan_host(
   int32_t outputCount
 );
 
+// Persistent execution context API (TensorRT 10+).
+// Creates a context bound to a serialized plan and a CUDA stream.
+// Returns 0 on failure.
+uintptr_t trt_context_create(const void* plan, size_t planSize);
+void trt_context_destroy(uintptr_t ctx);
+
+// Executes using a persistent context by copying host inputs to device, enqueueing, and copying outputs back to host.
+// Returns 0 on success.
+int trt_context_execute_host(
+  uintptr_t ctx,
+  const trt_named_buffer* inputs,
+  int32_t inputCount,
+  const trt_named_mutable_buffer* outputs,
+  int32_t outputCount
+);
+
 // Runs the identity plan on GPU using CUDA driver API.
 // Returns 0 on success.
 int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* input, int32_t elementCount, float* output);

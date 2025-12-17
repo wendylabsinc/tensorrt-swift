@@ -6,6 +6,8 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -94,6 +96,98 @@ CUresult ensureCudaPrimaryContext(CUcontext* outCtx) {
 
   *outCtx = ctx;
   return CUDA_SUCCESS;
+}
+
+class CudaPrimaryCtxGuard {
+public:
+  CudaPrimaryCtxGuard() = default;
+
+  CUresult init() {
+    CUresult status = cuInit(0);
+    if (status != CUDA_SUCCESS) {
+      return status;
+    }
+    status = cuDeviceGet(&device_, 0);
+    if (status != CUDA_SUCCESS) {
+      return status;
+    }
+    status = cuDevicePrimaryCtxRetain(&ctx_, device_);
+    if (status != CUDA_SUCCESS) {
+      return status;
+    }
+    retained_ = true;
+    return cuCtxSetCurrent(ctx_);
+  }
+
+  ~CudaPrimaryCtxGuard() {
+    if (retained_) {
+      cuDevicePrimaryCtxRelease(device_);
+    }
+  }
+
+private:
+  CUdevice device_{};
+  CUcontext ctx_{};
+  bool retained_{false};
+};
+
+class CudaStreamGuard {
+public:
+  CudaStreamGuard() = default;
+
+  CUresult init(unsigned int flags = CU_STREAM_DEFAULT) {
+    return cuStreamCreate(&stream_, flags);
+  }
+
+  ~CudaStreamGuard() {
+    if (stream_) {
+      cuStreamDestroy(stream_);
+    }
+  }
+
+  CUstream stream() const { return stream_; }
+
+private:
+  CUstream stream_{};
+};
+
+struct DeviceBuffer {
+  CUdeviceptr ptr{0};
+  size_t size{0};
+};
+
+struct PersistentExecutionContext {
+  CudaPrimaryCtxGuard cuda;
+  CudaStreamGuard stream;
+  uintptr_t engineHandle{0};
+  nvinfer1::ICudaEngine* engine{nullptr};
+  nvinfer1::IExecutionContext* exec{nullptr};
+  std::unordered_map<std::string, DeviceBuffer> buffers;
+};
+
+int ensureDeviceBuffer(PersistentExecutionContext& ctx, const char* name, size_t size, CUdeviceptr* outPtr) {
+  if (!name || size == 0 || !outPtr) {
+    return 1;
+  }
+  auto& entry = ctx.buffers[std::string(name)];
+  if (entry.ptr != 0 && entry.size == size) {
+    *outPtr = entry.ptr;
+    return 0;
+  }
+  if (entry.ptr != 0) {
+    cuMemFree(entry.ptr);
+    entry.ptr = 0;
+    entry.size = 0;
+  }
+  CUdeviceptr dptr = 0;
+  CUresult cu = cuMemAlloc(&dptr, size);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  entry.ptr = dptr;
+  entry.size = size;
+  *outPtr = dptr;
+  return 0;
 }
 } // namespace
 
@@ -324,21 +418,20 @@ int trt_execute_plan_host(
     return 1;
   }
 
-  CUcontext ctx;
-  CUresult cu = ensureCudaPrimaryContext(&ctx);
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
 
-  CUstream stream;
-  cu = cuStreamCreate(&stream, CU_STREAM_DEFAULT);
+  CudaStreamGuard stream;
+  cu = stream.init();
   if (cu != CUDA_SUCCESS) {
     return 3;
   }
 
   uintptr_t engineHandle = trt_deserialize_engine(plan, planSize);
   if (!engineHandle) {
-    cuStreamDestroy(stream);
     return 4;
   }
   auto* engine = reinterpret_cast<nvinfer1::ICudaEngine*>(engineHandle);
@@ -346,7 +439,6 @@ int trt_execute_plan_host(
   nvinfer1::IExecutionContext* exec = engine->createExecutionContext();
   if (!exec) {
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 5;
   }
 
@@ -364,7 +456,6 @@ int trt_execute_plan_host(
     }
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return code;
   };
 
@@ -381,7 +472,7 @@ int trt_execute_plan_host(
     }
     allocations.push_back(dptr);
 
-    cu = cuMemcpyHtoDAsync(dptr, in.data, in.size, stream);
+    cu = cuMemcpyHtoDAsync(dptr, in.data, in.size, stream.stream());
     if (cu != CUDA_SUCCESS) {
       return fail(8);
     }
@@ -419,7 +510,7 @@ int trt_execute_plan_host(
   }
 
 #if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
-  if (!exec->enqueueV3(reinterpret_cast<cudaStream_t>(stream))) {
+  if (!exec->enqueueV3(reinterpret_cast<cudaStream_t>(stream.stream()))) {
     return fail(13);
   }
 #else
@@ -431,13 +522,13 @@ int trt_execute_plan_host(
   for (int32_t i = 0; i < outputCount; i++) {
     auto const& out = outputs[i];
     CUdeviceptr dptr = allocations[static_cast<size_t>(outputBase + i)];
-    cu = cuMemcpyDtoHAsync(out.data, dptr, out.size, stream);
+    cu = cuMemcpyDtoHAsync(out.data, dptr, out.size, stream.stream());
     if (cu != CUDA_SUCCESS) {
       return fail(14);
     }
   }
 
-  cu = cuStreamSynchronize(stream);
+  cu = cuStreamSynchronize(stream.stream());
   if (cu != CUDA_SUCCESS) {
     return fail(15);
   }
@@ -449,8 +540,161 @@ int trt_execute_plan_host(
   }
   trtDestroy(exec);
   trt_destroy_engine(engineHandle);
-  cuStreamDestroy(stream);
   return 0;
+}
+
+uintptr_t trt_context_create(const void* plan, size_t planSize) {
+  if (!plan || planSize == 0) {
+    return 0;
+  }
+
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = new (std::nothrow) PersistentExecutionContext();
+  if (!ctx) {
+    return 0;
+  }
+
+  CUresult cu = ctx->cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    delete ctx;
+    return 0;
+  }
+
+  cu = ctx->stream.init();
+  if (cu != CUDA_SUCCESS) {
+    delete ctx;
+    return 0;
+  }
+
+  ctx->engineHandle = trt_deserialize_engine(plan, planSize);
+  if (!ctx->engineHandle) {
+    delete ctx;
+    return 0;
+  }
+  ctx->engine = reinterpret_cast<nvinfer1::ICudaEngine*>(ctx->engineHandle);
+
+  ctx->exec = ctx->engine->createExecutionContext();
+  if (!ctx->exec) {
+    trt_destroy_engine(ctx->engineHandle);
+    ctx->engineHandle = 0;
+    delete ctx;
+    return 0;
+  }
+
+  return reinterpret_cast<uintptr_t>(ctx);
+#else
+  (void)plan;
+  (void)planSize;
+  return 0;
+#endif
+}
+
+void trt_context_destroy(uintptr_t ctxHandle) {
+  if (!ctxHandle) {
+    return;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  for (auto& kv : ctx->buffers) {
+    if (kv.second.ptr) {
+      cuMemFree(kv.second.ptr);
+    }
+  }
+  ctx->buffers.clear();
+  trtDestroy(ctx->exec);
+  if (ctx->engineHandle) {
+    trt_destroy_engine(ctx->engineHandle);
+  }
+  delete ctx;
+#else
+  (void)ctxHandle;
+#endif
+}
+
+int trt_context_execute_host(
+  uintptr_t ctxHandle,
+  const trt_named_buffer* inputs,
+  int32_t inputCount,
+  const trt_named_mutable_buffer* outputs,
+  int32_t outputCount
+) {
+  if (!ctxHandle || !inputs || inputCount < 0 || !outputs || outputCount < 0) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  if (!ctx->exec) {
+    return 2;
+  }
+
+  for (int32_t i = 0; i < inputCount; i++) {
+    auto const& in = inputs[i];
+    if (!in.name || !in.data || in.size == 0) {
+      return 3;
+    }
+
+    CUdeviceptr dptr = 0;
+    int rc = ensureDeviceBuffer(*ctx, in.name, in.size, &dptr);
+    if (rc != 0) {
+      return 4;
+    }
+
+    CUresult cu = cuMemcpyHtoDAsync(dptr, in.data, in.size, ctx->stream.stream());
+    if (cu != CUDA_SUCCESS) {
+      return 5;
+    }
+
+    if (!ctx->exec->setTensorAddress(in.name, reinterpret_cast<void*>(dptr))) {
+      return 6;
+    }
+  }
+
+  for (int32_t i = 0; i < outputCount; i++) {
+    auto const& out = outputs[i];
+    if (!out.name || !out.data || out.size == 0) {
+      return 7;
+    }
+
+    CUdeviceptr dptr = 0;
+    int rc = ensureDeviceBuffer(*ctx, out.name, out.size, &dptr);
+    if (rc != 0) {
+      return 8;
+    }
+
+    if (!ctx->exec->setTensorAddress(out.name, reinterpret_cast<void*>(dptr))) {
+      return 9;
+    }
+  }
+
+  if (!ctx->exec->enqueueV3(reinterpret_cast<cudaStream_t>(ctx->stream.stream()))) {
+    return 10;
+  }
+
+  for (int32_t i = 0; i < outputCount; i++) {
+    auto const& out = outputs[i];
+    auto it = ctx->buffers.find(std::string(out.name));
+    if (it == ctx->buffers.end() || it->second.ptr == 0) {
+      return 11;
+    }
+    CUresult cu = cuMemcpyDtoHAsync(out.data, it->second.ptr, out.size, ctx->stream.stream());
+    if (cu != CUDA_SUCCESS) {
+      return 12;
+    }
+  }
+
+  CUresult cu = cuStreamSynchronize(ctx->stream.stream());
+  if (cu != CUDA_SUCCESS) {
+    return 13;
+  }
+  return 0;
+#else
+  (void)ctxHandle;
+  (void)inputs;
+  (void)inputCount;
+  (void)outputs;
+  (void)outputCount;
+  return 100;
+#endif
 }
 
 int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* input, int32_t elementCount, float* output) {
@@ -458,21 +702,20 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
     return 1;
   }
 
-  CUcontext ctx;
-  CUresult cu = ensureCudaPrimaryContext(&ctx);
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
 
-  CUstream stream;
-  cu = cuStreamCreate(&stream, CU_STREAM_DEFAULT);
+  CudaStreamGuard stream;
+  cu = stream.init();
   if (cu != CUDA_SUCCESS) {
     return 3;
   }
 
   uintptr_t engineHandle = trt_deserialize_engine(plan, planSize);
   if (!engineHandle) {
-    cuStreamDestroy(stream);
     return 4;
   }
   auto* engine = reinterpret_cast<nvinfer1::ICudaEngine*>(engineHandle);
@@ -480,7 +723,6 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
   nvinfer1::IExecutionContext* exec = engine->createExecutionContext();
   if (!exec) {
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 5;
   }
 
@@ -491,7 +733,6 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
   if (!exec->setInputShape("input", dims)) {
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 6;
   }
 #endif
@@ -504,7 +745,6 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
   if (cu != CUDA_SUCCESS) {
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 7;
   }
   cu = cuMemAlloc(&dOutput, byteCount);
@@ -512,17 +752,15 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
     cuMemFree(dInput);
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 8;
   }
 
-  cu = cuMemcpyHtoDAsync(dInput, input, byteCount, stream);
+  cu = cuMemcpyHtoDAsync(dInput, input, byteCount, stream.stream());
   if (cu != CUDA_SUCCESS) {
     cuMemFree(dOutput);
     cuMemFree(dInput);
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 9;
   }
 
@@ -532,7 +770,6 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
     cuMemFree(dInput);
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 10;
   }
   if (!exec->setTensorAddress("output", reinterpret_cast<void*>(dOutput))) {
@@ -540,16 +777,14 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
     cuMemFree(dInput);
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 11;
   }
 
-  if (!exec->enqueueV3(reinterpret_cast<cudaStream_t>(stream))) {
+  if (!exec->enqueueV3(reinterpret_cast<cudaStream_t>(stream.stream()))) {
     cuMemFree(dOutput);
     cuMemFree(dInput);
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 12;
   }
 #else
@@ -560,30 +795,27 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
   if (!exec->enqueueV2(bindings, reinterpret_cast<cudaStream_t>(stream), nullptr)) {
     cuMemFree(dOutput);
     cuMemFree(dInput);
-    exec->destroy();
+    trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 12;
   }
 #endif
 
-  cu = cuMemcpyDtoHAsync(output, dOutput, byteCount, stream);
+  cu = cuMemcpyDtoHAsync(output, dOutput, byteCount, stream.stream());
   if (cu != CUDA_SUCCESS) {
     cuMemFree(dOutput);
     cuMemFree(dInput);
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 13;
   }
 
-  cu = cuStreamSynchronize(stream);
+  cu = cuStreamSynchronize(stream.stream());
   if (cu != CUDA_SUCCESS) {
     cuMemFree(dOutput);
     cuMemFree(dInput);
     trtDestroy(exec);
     trt_destroy_engine(engineHandle);
-    cuStreamDestroy(stream);
     return 14;
   }
 
@@ -591,6 +823,5 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
   cuMemFree(dInput);
   trtDestroy(exec);
   trt_destroy_engine(engineHandle);
-  cuStreamDestroy(stream);
   return 0;
 }
