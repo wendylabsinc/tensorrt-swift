@@ -2,8 +2,13 @@
 
 Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT engines on Linux.
 
-This repository is a **work in progress**. The public API is still evolving and not all planned
-features are implemented yet.
+This repository is **work in progress** and **subject to breaking changes** (including major public
+API reshuffles) while the low-level foundations are still being established.
+
+Swift 6.2 features are used aggressively where feasible:
+- `InlineArray` to keep common small metadata (like shapes/strides) allocation-free.
+- `Span` / `MutableSpan` / `Data.bytes` for safer, more composable views over contiguous memory at
+  the boundaries where we hand buffers to TensorRT/CUDA.
 
 ## Requirements
 
@@ -28,6 +33,8 @@ The following public APIs have real integration with the TensorRT system librari
 - `TensorRTSystem.buildIdentityEnginePlan(elementCount:)` (builds a tiny identity engine plan)
 - `TensorRTSystem.runIdentityPlanF32(plan:input:)` (runs the identity engine on GPU)
 - `TensorRTRuntime.deserializeEngine(from:configuration:)` (deserializes and reflects IO surface)
+- `ExecutionContext.enqueue(_:)` (executes a plan using host buffers)
+- `ExecutionContext.enqueueF32(inputName:input:outputName:output:...)` (single-input/single-output convenience)
 
 ## Quick Start
 
@@ -79,6 +86,49 @@ print("Outputs:", engine.description.outputs.map(\.name))
 // 3) Execute the plan via TensorRT enqueue + CUDA driver API.
 let input: [Float] = (0..<8).map(Float.init)
 let output = try TensorRTSystem.runIdentityPlanF32(plan: plan, input: input)
+precondition(output == input)
+```
+
+### Execute using the high-level `Engine` + `ExecutionContext`
+
+```swift
+import TensorRT
+
+let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: 8)
+let engine = try TensorRTRuntime().deserializeEngine(from: plan)
+let ctx = try engine.makeExecutionContext()
+
+let inputDesc = engine.description.inputs[0].descriptor
+let outputDesc = engine.description.outputs[0].descriptor
+
+let inputFloats: [Float] = (0..<8).map(Float.init)
+let inputBytes = inputFloats.withUnsafeBufferPointer { Data(buffer: $0) }
+
+let input = TensorValue(
+    descriptor: inputDesc,
+    storage: .host(inputBytes)
+)
+
+let batch = InferenceBatch(inputs: [inputDesc.name: input])
+let result = try await ctx.enqueue(batch)
+let outputValue = result.outputs[outputDesc.name]!
+```
+
+### Execute with caller-provided buffers (`[Float]` / `[UInt8]`)
+
+```swift
+import TensorRT
+
+let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: 8)
+let engine = try TensorRTRuntime().deserializeEngine(from: plan)
+let ctx = try engine.makeExecutionContext()
+
+let inputName = engine.description.inputs[0].name
+let outputName = engine.description.outputs[0].name
+
+let input: [Float] = (0..<8).map(Float.init)
+var output: [Float] = []
+try await ctx.enqueueF32(inputName: inputName, input: input, outputName: outputName, output: &output)
 precondition(output == input)
 ```
 
