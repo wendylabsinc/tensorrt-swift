@@ -42,6 +42,21 @@ int trt_build_identity_engine_f32(int32_t elementCount, uint8_t** outData, size_
 // The returned buffer must be freed with trt_free().
 int trt_build_dynamic_identity_engine_f32(int32_t min, int32_t opt, int32_t max, uint8_t** outData, size_t* outSize);
 
+// Builds a trivial FP32 identity engine with a single dynamic dimension and two optimization profiles.
+//   input:  float32[-1]
+//   output: float32[-1]
+// Returns 0 on success.
+int trt_build_dual_profile_identity_engine_f32(
+  int32_t min0,
+  int32_t opt0,
+  int32_t max0,
+  int32_t min1,
+  int32_t opt1,
+  int32_t max1,
+  uint8_t** outData,
+  size_t* outSize
+);
+
 // Frees buffers returned by TensorRTNative shim (malloc/free).
 void trt_free(void* ptr);
 
@@ -63,6 +78,9 @@ typedef struct trt_io_tensor_desc {
 
 int trt_engine_get_io_count(uintptr_t engine, int32_t* outCount);
 int trt_engine_get_io_desc(uintptr_t engine, int32_t index, trt_io_tensor_desc* outDesc);
+// Returns the number of optimization profiles in the engine.
+// Returns 0 on success.
+int trt_engine_get_profile_count(uintptr_t engine, int32_t* outCount);
 
 typedef struct trt_named_buffer {
   char const* name;
@@ -96,6 +114,11 @@ uintptr_t trt_context_create(const void* plan, size_t planSize);
 // When `ownsStream` is non-zero, the context will destroy the stream on `trt_context_destroy`.
 uintptr_t trt_context_create_with_stream(const void* plan, size_t planSize, uint64_t stream, int32_t ownsStream);
 void trt_context_destroy(uintptr_t ctx);
+
+// Sets the active optimization profile on a persistent context (TensorRT 10+).
+// Must be called before setting input shapes for that profile.
+// Returns 0 on success.
+int trt_context_set_optimization_profile(uintptr_t ctx, int32_t profileIndex);
 
 // Sets an input shape on a persistent context (TensorRT 10+).
 // Returns 0 on success.

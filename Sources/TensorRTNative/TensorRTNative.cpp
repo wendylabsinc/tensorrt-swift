@@ -482,6 +482,131 @@ int trt_build_dynamic_identity_engine_f32(int32_t min, int32_t opt, int32_t max,
   return 0;
 }
 
+int trt_build_dual_profile_identity_engine_f32(
+  int32_t min0,
+  int32_t opt0,
+  int32_t max0,
+  int32_t min1,
+  int32_t opt1,
+  int32_t max1,
+  uint8_t** outData,
+  size_t* outSize
+) {
+  if (!outData || !outSize) {
+    return 1;
+  }
+  if (min0 <= 0 || opt0 <= 0 || max0 <= 0 || min0 > opt0 || opt0 > max0) {
+    return 2;
+  }
+  if (min1 <= 0 || opt1 <= 0 || max1 <= 0 || min1 > opt1 || opt1 > max1) {
+    return 3;
+  }
+
+  *outData = nullptr;
+  *outSize = 0;
+
+  nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(logger());
+  if (!builder) {
+    return 4;
+  }
+
+  uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+  nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
+  if (!network) {
+    trtDestroy(builder);
+    return 5;
+  }
+
+  nvinfer1::Dims inputDims;
+  inputDims.nbDims = 1;
+  inputDims.d[0] = -1;
+  auto* input = network->addInput("input", nvinfer1::DataType::kFLOAT, inputDims);
+  if (!input) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 6;
+  }
+
+  auto* identity = network->addIdentity(*input);
+  if (!identity) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 7;
+  }
+
+  auto* out = identity->getOutput(0);
+  if (!out) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 8;
+  }
+  out->setName("output");
+  network->markOutput(*out);
+
+  nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
+  if (!config) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 9;
+  }
+
+  config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1U << 20);
+
+  auto addProfile = [&](int32_t min, int32_t opt, int32_t max) -> bool {
+    nvinfer1::IOptimizationProfile* profile = builder->createOptimizationProfile();
+    if (!profile) {
+      return false;
+    }
+
+    nvinfer1::Dims dmin;
+    dmin.nbDims = 1;
+    dmin.d[0] = min;
+    nvinfer1::Dims dopt;
+    dopt.nbDims = 1;
+    dopt.d[0] = opt;
+    nvinfer1::Dims dmax;
+    dmax.nbDims = 1;
+    dmax.d[0] = max;
+
+    bool ok = true;
+    ok = ok && profile->setDimensions("input", nvinfer1::OptProfileSelector::kMIN, dmin);
+    ok = ok && profile->setDimensions("input", nvinfer1::OptProfileSelector::kOPT, dopt);
+    ok = ok && profile->setDimensions("input", nvinfer1::OptProfileSelector::kMAX, dmax);
+    if (!ok) {
+      return false;
+    }
+    return config->addOptimizationProfile(profile) >= 0;
+  };
+
+  if (!addProfile(min0, opt0, max0) || !addProfile(min1, opt1, max1)) {
+    trtDestroy(config);
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 10;
+  }
+
+  nvinfer1::IHostMemory* serialized = builder->buildSerializedNetwork(*network, *config);
+  trtDestroy(config);
+  trtDestroy(network);
+  trtDestroy(builder);
+
+  if (!serialized || !serialized->data() || serialized->size() == 0) {
+    trtDestroy(serialized);
+    return 11;
+  }
+
+  void* buffer = std::malloc(serialized->size());
+  if (!buffer) {
+    trtDestroy(serialized);
+    return 12;
+  }
+  std::memcpy(buffer, serialized->data(), serialized->size());
+  *outData = reinterpret_cast<uint8_t*>(buffer);
+  *outSize = serialized->size();
+  trtDestroy(serialized);
+  return 0;
+}
+
 void trt_free(void* ptr) {
   std::free(ptr);
 }
@@ -509,6 +634,15 @@ void trt_destroy_engine(uintptr_t engine) {
   }
   auto* ptr = reinterpret_cast<nvinfer1::ICudaEngine*>(engine);
   trtDestroy(ptr);
+}
+
+int trt_engine_get_profile_count(uintptr_t engine, int32_t* outCount) {
+  if (!engine || !outCount) {
+    return 1;
+  }
+  auto* ptr = reinterpret_cast<nvinfer1::ICudaEngine*>(engine);
+  *outCount = static_cast<int32_t>(ptr->getNbOptimizationProfiles());
+  return (*outCount >= 0) ? 0 : 2;
 }
 
 int trt_engine_get_io_count(uintptr_t engine, int32_t* outCount) {
@@ -1186,6 +1320,28 @@ int trt_cuda_memcpy_dtoh(void* dst, uint64_t srcAddress, size_t byteCount) {
   }
   cu = cuMemcpyDtoH(dst, static_cast<CUdeviceptr>(srcAddress), byteCount);
   return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_context_set_optimization_profile(uintptr_t ctxHandle, int32_t profileIndex) {
+  if (!ctxHandle || profileIndex < 0) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  if (!ctx->exec) {
+    return 2;
+  }
+
+  // TensorRT requires a stream for async profile switching.
+  if (!ctx->exec->setOptimizationProfileAsync(profileIndex, reinterpret_cast<cudaStream_t>(ctx->stream))) {
+    return 3;
+  }
+  return 0;
+#else
+  (void)ctxHandle;
+  (void)profileIndex;
+  return 100;
+#endif
 }
 
 int trt_context_set_input_shape(uintptr_t ctxHandle, const char* inputName, const int32_t* dims, int32_t nbDims) {
