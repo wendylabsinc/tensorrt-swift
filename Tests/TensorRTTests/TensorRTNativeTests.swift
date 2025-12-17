@@ -10,6 +10,43 @@ import TensorRTNative
     #expect(version.major > 0)
 }
 
+@Test("Engine device selection is respected") func tensorRTDeviceSelectionRespected() async throws {
+    let deviceCount = try TensorRTSystem.cudaDeviceCount()
+    #expect(deviceCount >= 1)
+    let chosen = (deviceCount >= 2) ? 1 : 0
+
+    let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: 8)
+    let runtime = TensorRTRuntime()
+    let engine = try runtime.deserializeEngine(from: plan, configuration: EngineLoadConfiguration(device: DeviceSelection(gpu: chosen)))
+    let context = try engine.makeExecutionContext()
+
+    let nativeIdx = try await context.nativeDeviceIndexForTesting()
+    #expect(nativeIdx == Int32(chosen))
+
+    let input: [Float] = (0..<8).map(Float.init)
+    let inputData = input.withUnsafeBufferPointer { buffer in
+        Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+    }
+
+    let inputDescriptor = engine.description.inputs[0].descriptor
+    let batch = InferenceBatch(inputs: ["input": TensorValue(descriptor: inputDescriptor, storage: .host(inputData))])
+    let result = try await context.enqueue(batch, synchronously: true)
+    guard let outputValue = result.outputs["output"] else {
+        throw TensorRTError.invalidBinding("Missing output tensor")
+    }
+    guard case .host(let outData) = outputValue.storage else {
+        throw TensorRTError.notImplemented("Expected host output from identity inference")
+    }
+
+    var output = [Float](repeating: 0, count: input.count)
+    output.withUnsafeMutableBytes { outBytes in
+        outData.withUnsafeBytes { inBytes in
+            outBytes.copyBytes(from: inBytes.prefix(outBytes.count))
+        }
+    }
+    #expect(output == input)
+}
+
 @Test("TensorRT runtime create/destroy") func tensorRTRuntimeLifecycle() async throws {
     _ = try TensorRTSystem.Runtime()
     #expect(true)

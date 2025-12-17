@@ -83,47 +83,19 @@ bool fillDims(int32_t* outDims, int32_t maxDims, nvinfer1::Dims const& dims, int
   return true;
 }
 
-CUresult ensureCudaPrimaryContext(CUcontext* outCtx) {
-  if (!outCtx) {
-    return CUDA_ERROR_INVALID_VALUE;
-  }
-  CUresult status = cuInit(0);
-  if (status != CUDA_SUCCESS) {
-    return status;
-  }
-
-  CUdevice device;
-  status = cuDeviceGet(&device, 0);
-  if (status != CUDA_SUCCESS) {
-    return status;
-  }
-
-  CUcontext ctx;
-  status = cuDevicePrimaryCtxRetain(&ctx, device);
-  if (status != CUDA_SUCCESS) {
-    return status;
-  }
-
-  status = cuCtxSetCurrent(ctx);
-  if (status != CUDA_SUCCESS) {
-    cuDevicePrimaryCtxRelease(device);
-    return status;
-  }
-
-  *outCtx = ctx;
-  return CUDA_SUCCESS;
-}
-
 class CudaPrimaryCtxGuard {
 public:
   CudaPrimaryCtxGuard() = default;
 
-  CUresult init() {
+  CUresult init(int32_t deviceIndex) {
+    if (deviceIndex < 0) {
+      return CUDA_ERROR_INVALID_VALUE;
+    }
     CUresult status = cuInit(0);
     if (status != CUDA_SUCCESS) {
       return status;
     }
-    status = cuDeviceGet(&device_, 0);
+    status = cuDeviceGet(&device_, deviceIndex);
     if (status != CUDA_SUCCESS) {
       return status;
     }
@@ -134,6 +106,15 @@ public:
     retained_ = true;
     return cuCtxSetCurrent(ctx_);
   }
+
+  CUresult setCurrent() const {
+    if (!retained_) {
+      return CUDA_ERROR_INVALID_CONTEXT;
+    }
+    return cuCtxSetCurrent(ctx_);
+  }
+
+  CUcontext ctx() const { return ctx_; }
 
   ~CudaPrimaryCtxGuard() {
     if (retained_) {
@@ -174,6 +155,7 @@ struct DeviceBuffer {
 
 struct PersistentExecutionContext {
   CudaPrimaryCtxGuard cuda;
+  int32_t deviceIndex{0};
   CUstream stream{};
   bool destroyStream{false};
   uintptr_t engineHandle{0};
@@ -253,6 +235,23 @@ int trt_plugins_load_library(const char* path) {
   }
 
   retainPluginHandle(handle);
+  return 0;
+}
+
+int trt_cuda_device_count(int32_t* outCount) {
+  if (!outCount) {
+    return 1;
+  }
+  CUresult status = cuInit(0);
+  if (status != CUDA_SUCCESS) {
+    return 2;
+  }
+  int count = 0;
+  status = cuDeviceGetCount(&count);
+  if (status != CUDA_SUCCESS) {
+    return 3;
+  }
+  *outCount = static_cast<int32_t>(count);
   return 0;
 }
 
@@ -719,7 +718,7 @@ int trt_execute_plan_host(
   }
 
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -844,7 +843,11 @@ int trt_execute_plan_host(
 }
 
 uintptr_t trt_context_create(const void* plan, size_t planSize) {
-  if (!plan || planSize == 0) {
+  return trt_context_create_on_device(plan, planSize, 0);
+}
+
+uintptr_t trt_context_create_on_device(const void* plan, size_t planSize, int32_t deviceIndex) {
+  if (!plan || planSize == 0 || deviceIndex < 0) {
     return 0;
   }
 
@@ -853,8 +856,9 @@ uintptr_t trt_context_create(const void* plan, size_t planSize) {
   if (!ctx) {
     return 0;
   }
+  ctx->deviceIndex = deviceIndex;
 
-  CUresult cu = ctx->cuda.init();
+  CUresult cu = ctx->cuda.init(ctx->deviceIndex);
   if (cu != CUDA_SUCCESS) {
     delete ctx;
     return 0;
@@ -894,12 +898,17 @@ uintptr_t trt_context_create(const void* plan, size_t planSize) {
 #else
   (void)plan;
   (void)planSize;
+  (void)deviceIndex;
   return 0;
 #endif
 }
 
 uintptr_t trt_context_create_with_stream(const void* plan, size_t planSize, uint64_t stream, int32_t ownsStream) {
-  if (!plan || planSize == 0 || stream == 0) {
+  return trt_context_create_with_stream_on_device(plan, planSize, stream, ownsStream, 0);
+}
+
+uintptr_t trt_context_create_with_stream_on_device(const void* plan, size_t planSize, uint64_t stream, int32_t ownsStream, int32_t deviceIndex) {
+  if (!plan || planSize == 0 || stream == 0 || deviceIndex < 0) {
     return 0;
   }
 
@@ -908,8 +917,9 @@ uintptr_t trt_context_create_with_stream(const void* plan, size_t planSize, uint
   if (!ctx) {
     return 0;
   }
+  ctx->deviceIndex = deviceIndex;
 
-  CUresult cu = ctx->cuda.init();
+  CUresult cu = ctx->cuda.init(ctx->deviceIndex);
   if (cu != CUDA_SUCCESS) {
     delete ctx;
     return 0;
@@ -917,6 +927,21 @@ uintptr_t trt_context_create_with_stream(const void* plan, size_t planSize, uint
 
   ctx->stream = reinterpret_cast<CUstream>(static_cast<uintptr_t>(stream));
   ctx->destroyStream = (ownsStream != 0);
+
+  // Validate that the provided stream belongs to the same CUDA context (best-effort).
+  CUcontext streamCtx = nullptr;
+  CUresult streamCtxStatus = cuStreamGetCtx(ctx->stream, &streamCtx);
+  if (streamCtxStatus == CUDA_SUCCESS && streamCtx != nullptr) {
+    CUcontext current = nullptr;
+    cuCtxGetCurrent(&current);
+    if (current != streamCtx) {
+      if (ctx->destroyStream && ctx->stream) {
+        cuStreamDestroy(ctx->stream);
+      }
+      delete ctx;
+      return 0;
+    }
+  }
 
   ctx->engineHandle = trt_deserialize_engine(plan, planSize);
   if (!ctx->engineHandle) {
@@ -945,6 +970,7 @@ uintptr_t trt_context_create_with_stream(const void* plan, size_t planSize, uint
   (void)planSize;
   (void)stream;
   (void)ownsStream;
+  (void)deviceIndex;
   return 0;
 #endif
 }
@@ -974,6 +1000,21 @@ void trt_context_destroy(uintptr_t ctxHandle) {
 #endif
 }
 
+int trt_context_get_device_index(uintptr_t ctxHandle, int32_t* outDeviceIndex) {
+  if (!ctxHandle || !outDeviceIndex) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  *outDeviceIndex = ctx->deviceIndex;
+  return 0;
+#else
+  (void)ctxHandle;
+  (void)outDeviceIndex;
+  return 100;
+#endif
+}
+
 int trt_context_execute_host(
   uintptr_t ctxHandle,
   const trt_named_buffer* inputs,
@@ -988,6 +1029,9 @@ int trt_context_execute_host(
   auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
   if (!ctx->exec) {
     return 2;
+  }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
   }
 
   for (int32_t i = 0; i < inputCount; i++) {
@@ -1076,6 +1120,9 @@ int trt_context_execute_device(
   if (!ctx->exec) {
     return 2;
   }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
+  }
 
   for (int32_t i = 0; i < inputCount; i++) {
     auto const& in = inputs[i];
@@ -1124,7 +1171,7 @@ int trt_cuda_malloc(size_t byteCount, uint64_t* outAddress) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1142,7 +1189,7 @@ int trt_cuda_stream_create(uint64_t* outStream) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1160,7 +1207,7 @@ int trt_cuda_stream_destroy(uint64_t stream) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1173,7 +1220,7 @@ int trt_cuda_stream_synchronize(uint64_t stream) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1186,7 +1233,7 @@ int trt_cuda_event_create(uint64_t* outEvent) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1204,7 +1251,7 @@ int trt_cuda_event_destroy(uint64_t event) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1217,7 +1264,7 @@ int trt_cuda_event_record(uint64_t event, uint64_t stream) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1233,7 +1280,7 @@ int trt_cuda_event_synchronize(uint64_t event) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1246,7 +1293,7 @@ int trt_cuda_event_query(uint64_t event, int32_t* outReady) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1271,6 +1318,9 @@ int trt_context_record_event(uintptr_t ctxHandle, uint64_t event) {
   if (!ctx->stream) {
     return 2;
   }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
+  }
   CUresult cu = cuEventRecord(
     reinterpret_cast<CUevent>(static_cast<uintptr_t>(event)),
     ctx->stream
@@ -1288,7 +1338,7 @@ int trt_cuda_free(uint64_t address) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1301,7 +1351,7 @@ int trt_cuda_memcpy_htod(uint64_t dstAddress, const void* src, size_t byteCount)
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1314,7 +1364,7 @@ int trt_cuda_memcpy_dtoh(void* dst, uint64_t srcAddress, size_t byteCount) {
     return 1;
   }
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }
@@ -1330,6 +1380,9 @@ int trt_context_set_optimization_profile(uintptr_t ctxHandle, int32_t profileInd
   auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
   if (!ctx->exec) {
     return 2;
+  }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
   }
 
   // TensorRT requires a stream for async profile switching.
@@ -1352,6 +1405,9 @@ int trt_context_set_input_shape(uintptr_t ctxHandle, const char* inputName, cons
   auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
   if (!ctx->exec) {
     return 2;
+  }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
   }
 
   nvinfer1::Dims d;
@@ -1381,6 +1437,9 @@ int trt_context_get_tensor_shape(uintptr_t ctxHandle, const char* tensorName, in
   if (!ctx->exec) {
     return 2;
   }
+  if (ctx->cuda.setCurrent() != CUDA_SUCCESS) {
+    return 20;
+  }
   nvinfer1::Dims d = ctx->exec->getTensorShape(tensorName);
   if (!fillDims(outDims, maxDims, d, outNbDims)) {
     return 3;
@@ -1402,7 +1461,7 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
   }
 
   CudaPrimaryCtxGuard cuda;
-  CUresult cu = cuda.init();
+  CUresult cu = cuda.init(0);
   if (cu != CUDA_SUCCESS) {
     return 2;
   }

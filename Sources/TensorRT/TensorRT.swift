@@ -805,11 +805,13 @@ public actor ExecutionContext: ExecutionContexting {
     private var inputShapes: [String: TensorShape] = [:]
     private var requestedProfileIndex: Int32 = 0
     private var appliedProfileIndex: Int32?
+    private let deviceIndex: Int32
 
     public init(engine: Engine, queue: ExecutionQueue, allocator: MemoryAllocator = .default) {
         self.engine = engine
         self.queue = queue
         self.allocator = allocator
+        self.deviceIndex = Int32(engine.description.device.gpu ?? 0)
         if let raw = engine.description.metadata["defaultProfileIndex"], let parsed = Int32(raw) {
             requestedProfileIndex = parsed
         }
@@ -838,12 +840,12 @@ public actor ExecutionContext: ExecutionContexting {
         let handle: UInt = plan.withUnsafeBytes { bytes in
             switch queue {
             case .automatic:
-                return trt_context_create(bytes.baseAddress, bytes.count)
+                return trt_context_create_on_device(bytes.baseAddress, bytes.count, deviceIndex)
             case .external(let streamIdentifier):
-                return trt_context_create_with_stream(bytes.baseAddress, bytes.count, streamIdentifier, 0)
+                return trt_context_create_with_stream_on_device(bytes.baseAddress, bytes.count, streamIdentifier, 0, deviceIndex)
             case .capturedGraph(let streamIdentifier):
                 // TODO: expose CUDA graph capture semantics; for now this uses the provided stream.
-                return trt_context_create_with_stream(bytes.baseAddress, bytes.count, streamIdentifier, 0)
+                return trt_context_create_with_stream_on_device(bytes.baseAddress, bytes.count, streamIdentifier, 0, deviceIndex)
             }
         }
         guard handle != 0 else {
@@ -852,6 +854,21 @@ public actor ExecutionContext: ExecutionContexting {
         nativeContextHandle = NativeContextHandle(raw: handle)
         try applyOptimizationProfileIfNeeded(ctx: handle)
         return handle
+    }
+#endif
+
+#if canImport(TensorRTNative)
+    internal func nativeDeviceIndexForTesting() throws -> Int32 {
+        guard let plan = engine.serialized else {
+            throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
+        }
+        let ctx = try getOrCreateNativeContext(plan: plan)
+        var idx: Int32 = -1
+        let status = trt_context_get_device_index(ctx, &idx)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to query native context device index (status \(status)).")
+        }
+        return idx
     }
 #endif
 
