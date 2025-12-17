@@ -26,6 +26,13 @@ void trt_destroy_builder(uintptr_t builder);
 // The returned buffer must be freed with trt_free().
 int trt_build_identity_engine_f32(int32_t elementCount, uint8_t** outData, size_t* outSize);
 
+// Builds a trivial FP32 identity engine with a single dynamic dimension:
+//   input:  float32[-1]
+//   output: float32[-1]
+// A single optimization profile is embedded using min/opt/max for the dynamic dimension.
+// The returned buffer must be freed with trt_free().
+int trt_build_dynamic_identity_engine_f32(int32_t min, int32_t opt, int32_t max, uint8_t** outData, size_t* outSize);
+
 // Frees buffers returned by TensorRTNative shim (malloc/free).
 void trt_free(void* ptr);
 
@@ -66,6 +73,30 @@ typedef struct trt_named_mutable_buffer {
 int trt_execute_plan_host(
   const void* plan,
   size_t planSize,
+  const trt_named_buffer* inputs,
+  int32_t inputCount,
+  const trt_named_mutable_buffer* outputs,
+  int32_t outputCount
+);
+
+// Persistent execution context API (TensorRT 10+).
+// Creates a context bound to a serialized plan and a CUDA stream.
+// Returns 0 on failure.
+uintptr_t trt_context_create(const void* plan, size_t planSize);
+void trt_context_destroy(uintptr_t ctx);
+
+// Sets an input shape on a persistent context (TensorRT 10+).
+// Returns 0 on success.
+int trt_context_set_input_shape(uintptr_t ctx, const char* inputName, const int32_t* dims, int32_t nbDims);
+
+// Queries the resolved tensor shape on a persistent context (TensorRT 10+).
+// Returns 0 on success.
+int trt_context_get_tensor_shape(uintptr_t ctx, const char* tensorName, int32_t* outDims, int32_t maxDims, int32_t* outNbDims);
+
+// Executes using a persistent context by copying host inputs to device, enqueueing, and copying outputs back to host.
+// Returns 0 on success.
+int trt_context_execute_host(
+  uintptr_t ctx,
   const trt_named_buffer* inputs,
   int32_t inputCount,
   const trt_named_mutable_buffer* outputs,

@@ -789,12 +789,76 @@ public actor ExecutionContext: ExecutionContexting {
     public let engine: Engine
     public let queue: ExecutionQueue
     public let allocator: MemoryAllocator
+    private var nativeContextHandle: NativeContextHandle?
+    private var inputShapes: [String: TensorShape] = [:]
 
     public init(engine: Engine, queue: ExecutionQueue, allocator: MemoryAllocator = .default) {
         self.engine = engine
         self.queue = queue
         self.allocator = allocator
     }
+
+    private final class NativeContextHandle: @unchecked Sendable {
+#if canImport(TensorRTNative)
+        let raw: UInt
+
+        init(raw: UInt) {
+            self.raw = raw
+        }
+
+        deinit {
+            trt_context_destroy(raw)
+        }
+#endif
+    }
+
+#if canImport(TensorRTNative)
+    private func getOrCreateNativeContext(plan: Data) throws -> UInt {
+        if let existing = nativeContextHandle?.raw {
+            return existing
+        }
+
+        let handle: UInt = plan.withUnsafeBytes { bytes in
+            trt_context_create(bytes.baseAddress, bytes.count)
+        }
+        guard handle != 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to create persistent TensorRT execution context.")
+        }
+        nativeContextHandle = NativeContextHandle(raw: handle)
+        return handle
+    }
+#endif
+
+#if canImport(TensorRTNative)
+    private func applyInputShapesIfNeeded(ctx: UInt) throws {
+        guard !inputShapes.isEmpty else { return }
+        for (name, shape) in inputShapes {
+            var dims = [Int32](repeating: 0, count: TensorShape.maxRank)
+            for i in 0..<shape.rank {
+                dims[i] = shape.dims[i]
+            }
+            let status = trt_context_set_input_shape(ctx, name, dims, Int32(shape.rank))
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("Failed to set input shape for \(name) (status \(status)).")
+            }
+        }
+    }
+
+    private func resolvedTensorShape(ctx: UInt, name: String) throws -> TensorShape {
+        var nbDims: Int32 = 0
+        var dims = [Int32](repeating: 0, count: TensorShape.maxRank)
+        let status = trt_context_get_tensor_shape(ctx, name, &dims, Int32(TensorShape.maxRank), &nbDims)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to get tensor shape for \(name) (status \(status)).")
+        }
+        let count = min(TensorShape.maxRank, max(0, Int(nbDims)))
+        var inline = TensorShape.InlineDims(repeating: 0)
+        for i in 0..<count {
+            inline[i] = dims[i]
+        }
+        return TensorShape(rank: count, dims: inline)
+    }
+#endif
 
     /// Schedules a batch for execution. When `synchronously` is true, this awaits completion before returning.
     public func enqueue(
@@ -828,11 +892,34 @@ public actor ExecutionContext: ExecutionContexting {
             }
         }
 
+        let ctx = try getOrCreateNativeContext(plan: plan)
+
+        // For dynamic inputs, require a concrete shape (via reshape()) so we can validate sizes and
+        // allow TensorRT to resolve output shapes.
+        for binding in inputBindings {
+            if binding.descriptor.shape.isDynamic, inputShapes[binding.name] == nil {
+                throw TensorRTError.invalidShapeRange("Input \(binding.name) has dynamic shape; call reshape(bindings:) first.")
+            }
+            if let shape = inputShapes[binding.name], !shape.isDynamic {
+                let expectedBytes = shape.elementCount * binding.descriptor.dataType.byteCount
+                if let pair = inputPairs.first(where: { $0.name == binding.name }), pair.data.count != expectedBytes {
+                    throw TensorRTError.runtimeUnavailable("Input \(binding.name) expected \(expectedBytes) bytes for shape \(shape.dimensions), got \(pair.data.count).")
+                }
+            }
+        }
+
+        try applyInputShapesIfNeeded(ctx: ctx)
+
         // Prepare output buffers.
         let outputPairs: [(name: String, data: Data)] = try outputBindings.map { binding in
-            let desc = binding.descriptor
-            guard !desc.shape.isDynamic else {
-                throw TensorRTError.invalidShapeRange("Output \(binding.name) has dynamic shape; call reshape() once implemented.")
+            var desc = binding.descriptor
+            if desc.shape.isDynamic {
+                // Ask TensorRT for the resolved output shape after input shapes have been set.
+                let resolved = try resolvedTensorShape(ctx: ctx, name: binding.name)
+                guard !resolved.isDynamic else {
+                    throw TensorRTError.invalidShapeRange("Output \(binding.name) is still dynamic after reshape; resolved \(resolved.dimensions).")
+                }
+                desc.shape = resolved
             }
             let size = desc.shape.elementCount * desc.dataType.byteCount
             return (binding.name, Data(count: size))
@@ -915,16 +1002,7 @@ public actor ExecutionContext: ExecutionContexting {
                             outputs.append(trt_named_mutable_buffer(name: namePtrs[outputNameOffset + i], data: outPtrs[i], size: pairs[i].data.count))
                         }
 
-                        return plan.withUnsafeBytes { planBytes in
-                            trt_execute_plan_host(
-                                planBytes.baseAddress,
-                                planBytes.count,
-                                inputs,
-                                inputCount,
-                                outputs,
-                                outputCount
-                            )
-                        }
+                        return trt_context_execute_host(ctx, inputs, inputCount, outputs, outputCount)
                     }
                 }
             }
@@ -936,10 +1014,13 @@ public actor ExecutionContext: ExecutionContexting {
             throw TensorRTError.runtimeUnavailable("TensorRT enqueue failed (status \(status)).")
         }
 
-        let outputs: [String: TensorValue] = outputBindings.reduce(into: [:]) { dict, binding in
-            if let item = mutableOutputs.first(where: { $0.name == binding.name }) {
-                dict[binding.name] = TensorValue(descriptor: binding.descriptor, storage: .host(item.data))
+        let outputs: [String: TensorValue] = try outputBindings.reduce(into: [:]) { dict, binding in
+            guard let item = mutableOutputs.first(where: { $0.name == binding.name }) else { return }
+            var desc = binding.descriptor
+            if desc.shape.isDynamic {
+                desc.shape = try resolvedTensorShape(ctx: ctx, name: binding.name)
             }
+            dict[binding.name] = TensorValue(descriptor: desc, storage: .host(item.data))
         }
 
         return InferenceResult(outputs: outputs, duration: nil, metadata: [:], profileUsed: batch.profileName)
@@ -1027,18 +1108,10 @@ public actor ExecutionContext: ExecutionContexting {
                             size: outBuf.count * MemoryLayout<Float>.stride
                         )
 
-                        return plan.withUnsafeBytes { planBytes in
-                            withUnsafePointer(to: &inputBuffer) { inputPtr in
-                                withUnsafePointer(to: &outputBuffer) { outputPtr in
-                                    trt_execute_plan_host(
-                                        planBytes.baseAddress,
-                                        planBytes.count,
-                                        inputPtr,
-                                        1,
-                                        outputPtr,
-                                        1
-                                    )
-                                }
+                        let ctx = try getOrCreateNativeContext(plan: plan)
+                        return withUnsafePointer(to: &inputBuffer) { inputPtr in
+                            withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                trt_context_execute_host(ctx, inputPtr, 1, outputPtr, 1)
                             }
                         }
                     }
@@ -1123,18 +1196,10 @@ public actor ExecutionContext: ExecutionContexting {
                             size: outBuf.count
                         )
 
-                        return plan.withUnsafeBytes { planBytes in
-                            withUnsafePointer(to: &inputBuffer) { inputPtr in
-                                withUnsafePointer(to: &outputBuffer) { outputPtr in
-                                    trt_execute_plan_host(
-                                        planBytes.baseAddress,
-                                        planBytes.count,
-                                        inputPtr,
-                                        1,
-                                        outputPtr,
-                                        1
-                                    )
-                                }
+                        let ctx = try getOrCreateNativeContext(plan: plan)
+                        return withUnsafePointer(to: &inputBuffer) { inputPtr in
+                            withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                trt_context_execute_host(ctx, inputPtr, 1, outputPtr, 1)
                             }
                         }
                     }
@@ -1162,7 +1227,29 @@ public actor ExecutionContext: ExecutionContexting {
 
     /// Reshapes input and output bindings for dynamic shapes.
     public func reshape(bindings: [String: TensorShape]) async throws {
-        throw TensorRTError.notImplemented("Runtime reshape")
+#if canImport(TensorRTNative)
+        for (name, shape) in bindings {
+            guard engine.description.inputs.contains(where: { $0.name == name }) else {
+                throw TensorRTError.invalidBinding("reshape() expects input binding names; \(name) is not an input.")
+            }
+            guard shape.rank > 0, shape.rank <= TensorShape.maxRank else {
+                throw TensorRTError.invalidShapeRange("Invalid rank \(shape.rank) for \(name).")
+            }
+            guard !shape.isDynamic else {
+                throw TensorRTError.invalidShapeRange("reshape() requires concrete (non-dynamic) shapes; got \(shape.dimensions) for \(name).")
+            }
+        }
+
+        inputShapes = bindings
+
+        // If the native context already exists, apply immediately so output shape queries work.
+        if let plan = engine.serialized, let ctx = nativeContextHandle?.raw {
+            _ = plan // keep intent explicit; context is bound to the plan already.
+            try applyInputShapesIfNeeded(ctx: ctx)
+        }
+#else
+        throw TensorRTError.notImplemented("Runtime reshape requires TensorRTNative on Linux")
+#endif
     }
 
     /// Allocates and pins buffers ahead of time to reduce per-inference overhead.

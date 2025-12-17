@@ -40,6 +40,20 @@ public enum TensorRTSystem {
         return Data(bytes: rawPtr, count: size)
     }
 
+    /// Builds a small serialized FP32 identity engine plan with a single dynamic dimension.
+    ///
+    /// This is primarily intended for tests and early prototyping of `reshape(bindings:)`.
+    public static func buildDynamicIdentityEnginePlanF32(min: Int, opt: Int, max: Int) throws -> Data {
+        var rawPtr: UnsafeMutablePointer<UInt8>?
+        var size: Int = 0
+        let status = trt_build_dynamic_identity_engine_f32(Int32(min), Int32(opt), Int32(max), &rawPtr, &size)
+        guard status == 0, let rawPtr, size > 0 else {
+            throw TensorRTError.notImplemented("Failed to build dynamic identity engine plan (status \(status)).")
+        }
+        defer { trt_free(rawPtr) }
+        return Data(bytes: rawPtr, count: size)
+    }
+
     /// Builds a small serialized FP32 engine plan for a trivial identity network.
     ///
     /// - Note: Once `OutputSpan`-based container initializers are available in the toolchain,
