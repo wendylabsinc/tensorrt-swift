@@ -19,6 +19,10 @@ int trt_plugins_initialize(void);
 // Returns 0 on success.
 int trt_plugins_load_library(const char* path);
 
+// CUDA device queries.
+// Returns 0 on success.
+int trt_cuda_device_count(int32_t* outCount);
+
 // Creates/destroys a TensorRT runtime (nvinfer1::IRuntime).
 // Returns 0 on failure.
 uintptr_t trt_create_runtime(void);
@@ -110,10 +114,18 @@ int trt_execute_plan_host(
 // Creates a context bound to a serialized plan and a CUDA stream.
 // Returns 0 on failure.
 uintptr_t trt_context_create(const void* plan, size_t planSize);
+// Creates a context bound to a serialized plan on the specified CUDA device (primary context).
+uintptr_t trt_context_create_on_device(const void* plan, size_t planSize, int32_t deviceIndex);
 // Creates a context bound to a caller-provided CUDA stream (device 0 primary context).
 // When `ownsStream` is non-zero, the context will destroy the stream on `trt_context_destroy`.
 uintptr_t trt_context_create_with_stream(const void* plan, size_t planSize, uint64_t stream, int32_t ownsStream);
+// Same as `trt_context_create_with_stream`, but for the specified CUDA device (primary context).
+uintptr_t trt_context_create_with_stream_on_device(const void* plan, size_t planSize, uint64_t stream, int32_t ownsStream, int32_t deviceIndex);
 void trt_context_destroy(uintptr_t ctx);
+
+// Returns the CUDA device index used by this context (primary context).
+// Returns 0 on success.
+int trt_context_get_device_index(uintptr_t ctx, int32_t* outDeviceIndex);
 
 // Sets the active optimization profile on a persistent context (TensorRT 10+).
 // Must be called before setting input shapes for that profile.

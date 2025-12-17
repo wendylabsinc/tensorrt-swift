@@ -51,6 +51,16 @@ public enum TensorRTSystem {
         }
     }
 
+    /// Returns the number of CUDA devices visible to the CUDA driver.
+    public static func cudaDeviceCount() throws -> Int {
+        var count: Int32 = 0
+        let status = trt_cuda_device_count(&count)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to query CUDA device count (status \(status)).")
+        }
+        return Int(count)
+    }
+
     /// Builds a small serialized FP32 engine plan for a trivial identity network.
     public static func buildIdentityEnginePlan(elementCount: Int = 8) throws -> Data {
         var rawPtr: UnsafeMutablePointer<UInt8>?
