@@ -132,7 +132,7 @@ public enum TensorDataType: String, CaseIterable, Sendable {
 }
 
 /// Memory ordering for tensor elements.
-public enum TensorFormat: Sendable {
+public enum TensorFormat: Hashable, Sendable {
     case linear
     case nchw
     case nhwc
@@ -210,7 +210,7 @@ public struct QuantizationParameters: Hashable, Sendable {
     }
 
     /// Calibration algorithms supported for INT8/INT4 flows.
-    public enum CalibrationMethod: Sendable {
+    public enum CalibrationMethod: Hashable, Sendable {
         case entropy
         case minMax
         case percentile(Float)
@@ -1067,7 +1067,7 @@ public struct NetworkBuilder: Sendable {
             throw TensorRTError.invalidBinding("Recurrent layer requires at least one input")
         }
         let output = TensorBinding(descriptor: TensorDescriptor(name: name, shape: first.descriptor.shape, dataType: first.descriptor.dataType), role: .output)
-        let hiddenState = TensorBinding(descriptor: TensorDescriptor(name: name + \"_state\", shape: first.descriptor.shape, dataType: first.descriptor.dataType), role: .output)
+        let hiddenState = TensorBinding(descriptor: TensorDescriptor(name: name + "_state", shape: first.descriptor.shape, dataType: first.descriptor.dataType), role: .output)
         let layer = Layer(name: name, kind: .recurrent(parameters, inputs: inputs, outputs: [output, hiddenState]))
         definition.layers.append(layer)
         return [output, hiddenState]

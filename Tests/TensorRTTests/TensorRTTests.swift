@@ -1,6 +1,7 @@
 import Testing
 @testable import TensorRT
 
-@Test func example() async throws {
-    // Write your test here and use APIs like `#expect(...)` to check expected conditions.
+@Test("TensorRT runtime probe") func tensorRTProbe() async throws {
+    let version = try TensorRTRuntimeProbe.inferRuntimeVersion()
+    #expect(version.major > 0)
 }

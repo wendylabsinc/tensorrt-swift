@@ -20,5 +20,5 @@ let package = Package(
             dependencies: ["TensorRT"]
         ),
     ],
-    swiftLanguageVersions: [.v6]
+    swiftLanguageModes: [.v6]
 )
