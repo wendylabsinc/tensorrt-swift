@@ -1122,7 +1122,7 @@ public actor ExecutionContext: ExecutionContexting {
 
         let expectedInputElements = inputBinding.descriptor.shape.elementCount
         guard expectedInputElements > 0 else {
-            throw TensorRTError.invalidShapeRange("Input \(inputName) has dynamic shape; reshape() is not implemented yet.")
+            throw TensorRTError.invalidShapeRange("Input \(inputName) has dynamic shape; call reshape(bindings:) before enqueueF32.")
         }
         guard input.count == expectedInputElements else {
             throw TensorRTError.shapeMismatch(
@@ -1132,7 +1132,7 @@ public actor ExecutionContext: ExecutionContexting {
         }
 
         guard !outputBinding.descriptor.shape.isDynamic else {
-            throw TensorRTError.invalidShapeRange("Output \(outputName) has dynamic shape; reshape() is not implemented yet.")
+            throw TensorRTError.invalidShapeRange("Output \(outputName) has dynamic shape; call reshape(bindings:) before enqueueF32.")
         }
         let expectedOutputElements = outputBinding.descriptor.shape.elementCount
         if output.count != expectedOutputElements {
@@ -1213,7 +1213,7 @@ public actor ExecutionContext: ExecutionContexting {
 
         let expectedInputBytes = inputBinding.descriptor.shape.elementCount * inputBinding.descriptor.dataType.byteCount
         guard expectedInputBytes > 0 else {
-            throw TensorRTError.invalidShapeRange("Input \(inputName) has dynamic shape; reshape() is not implemented yet.")
+            throw TensorRTError.invalidShapeRange("Input \(inputName) has dynamic shape; call reshape(bindings:) before enqueueBytes.")
         }
         guard input.count == expectedInputBytes else {
             throw TensorRTError.invalidBinding("Input \(inputName) expected \(expectedInputBytes) bytes, got \(input.count).")
@@ -1221,7 +1221,7 @@ public actor ExecutionContext: ExecutionContexting {
 
         let expectedOutputBytes = outputBinding.descriptor.shape.elementCount * outputBinding.descriptor.dataType.byteCount
         guard expectedOutputBytes > 0 else {
-            throw TensorRTError.invalidShapeRange("Output \(outputName) has dynamic shape; reshape() is not implemented yet.")
+            throw TensorRTError.invalidShapeRange("Output \(outputName) has dynamic shape; call reshape(bindings:) before enqueueBytes.")
         }
         if output.count != expectedOutputBytes {
             output = Array(repeating: 0, count: expectedOutputBytes)

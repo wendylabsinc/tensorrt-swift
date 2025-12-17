@@ -23,7 +23,7 @@ Swift 6.2 features are used aggressively where feasible:
 
 Notes:
 - This package currently targets **system-installed** TensorRT headers/libs (via a tiny C++ shim
-  target that links `libnvinfer` on Linux).
+  target that links `libnvinfer`, `libnvinfer_plugin`, and `libnvonnxparser` on Linux).
 - You may need to ensure your container has access to the host GPU and driver libraries (e.g.
   NVIDIA Container Toolkit).
 
@@ -35,9 +35,21 @@ The following public APIs have real integration with the TensorRT system librari
 - `TensorRTSystem.linkedRuntimeVersion()` (linked `libnvinfer` version)
 - `TensorRTSystem.buildIdentityEnginePlan(elementCount:)` (builds a tiny identity engine plan)
 - `TensorRTSystem.runIdentityPlanF32(plan:input:)` (runs the identity engine on GPU)
+- `TensorRTSystem.initializePlugins()` / `TensorRTSystem.loadPluginLibrary(_:)` (plugin registration/loading)
 - `TensorRTRuntime.deserializeEngine(from:configuration:)` (deserializes and reflects IO surface)
+- `TensorRTRuntime.buildEngine(onnxURL:options:)` (builds a TensorRT plan via `nvonnxparser`)
 - `ExecutionContext.enqueue(_:)` (executes a plan using host buffers)
-- `ExecutionContext.enqueueF32(inputName:input:outputName:output:...)` (single-input/single-output convenience)
+- `ExecutionContext.enqueueDevice(inputs:outputs:synchronously:)` (device pointers + async support)
+- `ExecutionQueue.external(streamIdentifier:)` (enqueue on a caller-provided CUDA stream)
+- `ExecutionContext.recordEvent(_:)` + `TensorRTSystem.CUDAEvent` (event-based completion)
+- Dynamic shapes + profiles:
+  - `ExecutionContext.reshape(bindings:)`
+  - `ExecutionContext.setOptimizationProfile(named:)`
+- Multi-GPU selection:
+  - `DeviceSelection(gpu:)` is respected by `ExecutionContext`
+- Convenience:
+  - `ExecutionContext.enqueueF32(inputName:input:outputName:output:...)` (single-input/single-output)
+  - `ExecutionContext.enqueueBytes(inputName:input:outputName:output:...)` (byte-level)
 
 ## Quick Start
 
@@ -76,6 +88,73 @@ import TensorRT
 
 let version = try TensorRTRuntimeProbe.inferRuntimeVersion()
 print("TensorRT runtime version: \(version)")
+```
+
+### Build an engine from ONNX (static shape) and run it
+
+```swift
+import TensorRT
+
+let runtime = TensorRTRuntime()
+let engine = try runtime.buildEngine(
+    onnxURL: URL(fileURLWithPath: "model.onnx"),
+    options: EngineBuildOptions(
+        precision: [.fp32],
+        workspaceSizeBytes: 1 << 28
+    )
+)
+
+let ctx = try engine.makeExecutionContext()
+let inputDesc = engine.description.inputs[0].descriptor
+
+let input: [Float] = (0..<inputDesc.shape.elementCount).map(Float.init)
+let inputBytes = input.withUnsafeBufferPointer { Data(buffer: $0) }
+
+let batch = InferenceBatch(inputs: [
+    inputDesc.name: TensorValue(descriptor: inputDesc, storage: .host(inputBytes))
+])
+let result = try await ctx.enqueue(batch)
+```
+
+### Build a dynamic ONNX engine with optimization profiles
+
+If your ONNX model has dynamic shapes, you must provide optimization profiles at build time and
+select a profile + `reshape(...)` at runtime.
+
+```swift
+import TensorRT
+
+let profile0 = OptimizationProfile(
+    name: "0",
+    axes: [:],
+    bindingRanges: [
+        "input": .init(min: TensorShape([1]), optimal: TensorShape([8]), max: TensorShape([16])),
+    ]
+)
+
+let profile1 = OptimizationProfile(
+    name: "1",
+    axes: [:],
+    bindingRanges: [
+        "input": .init(min: TensorShape([32]), optimal: TensorShape([32]), max: TensorShape([64])),
+    ]
+)
+
+let engine = try TensorRTRuntime().buildEngine(
+    onnxURL: URL(fileURLWithPath: "dynamic.onnx"),
+    options: EngineBuildOptions(precision: [.fp32], profiles: [profile0, profile1])
+)
+let ctx = try engine.makeExecutionContext()
+```
+
+### Dynamic shapes checklist (profiles + reshape)
+
+For dynamic-shape engines, the typical order is:
+
+```swift
+try await ctx.setOptimizationProfile(named: "0")
+try await ctx.reshape(bindings: ["input": TensorShape([8])])
+let result = try await ctx.enqueue(batch)
 ```
 
 ### Build, deserialize, and run a tiny identity engine (GPU)
@@ -149,5 +228,5 @@ Run:
 swift test
 ```
 
-The test suite includes an end-to-end GPU test that builds an identity engine with TensorRT,
-deserializes it, and runs inference.
+The test suite includes end-to-end GPU tests that build engines (TensorRT builder and `nvonnxparser`),
+deserialize them, and run inference (host buffers, device pointers, external streams, and CUDA events).
