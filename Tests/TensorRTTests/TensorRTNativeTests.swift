@@ -3,6 +3,7 @@ import FoundationEssentials
 @testable import TensorRT
 
 #if canImport(TensorRTNative)
+import TensorRTNative
 
 @Test("TensorRT linked version") func tensorRTLinkedVersion() async throws {
     let version = try TensorRTSystem.linkedRuntimeVersion()
@@ -141,6 +142,43 @@ import FoundationEssentials
     guard let outB = resultB.outputs["output"] else { throw TensorRTError.invalidBinding("Missing output") }
     guard case .host(let outDataB) = outB.storage else { throw TensorRTError.notImplemented("Expected host output") }
     #expect(outDataB.count == inputDataB.count)
+}
+
+@Test("Device buffer enqueue executes on GPU") func tensorRTDeviceBufferEnqueue() async throws {
+    let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: 8)
+    let engine = try TensorRTRuntime().deserializeEngine(from: plan)
+    let context = try engine.makeExecutionContext()
+
+    let input: [Float] = (0..<8).map(Float.init)
+    let byteCount = input.count * MemoryLayout<Float>.stride
+
+    var dIn: UInt64 = 0
+    var dOut: UInt64 = 0
+    #expect(trt_cuda_malloc(byteCount, &dIn) == 0)
+    #expect(trt_cuda_malloc(byteCount, &dOut) == 0)
+    defer {
+        _ = trt_cuda_free(dOut)
+        _ = trt_cuda_free(dIn)
+    }
+
+    try input.withUnsafeBytes { raw in
+        let status = trt_cuda_memcpy_htod(dIn, raw.baseAddress, raw.count)
+        #expect(status == 0)
+    }
+
+    try await context.enqueueDevice(
+        inputs: ["input": (address: dIn, length: byteCount)],
+        outputs: ["output": (address: dOut, length: byteCount)],
+        synchronously: true
+    )
+
+    var output = [Float](repeating: 0, count: input.count)
+    try output.withUnsafeMutableBytes { raw in
+        let status = trt_cuda_memcpy_dtoh(raw.baseAddress, dOut, raw.count)
+        #expect(status == 0)
+    }
+
+    #expect(output == input)
 }
 
 #endif
