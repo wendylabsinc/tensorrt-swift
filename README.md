@@ -50,7 +50,7 @@ import PackageDescription
 let package = Package(
     name: "MyApp",
     dependencies: [
-        .package(url: "https://github.com/wendylabsinc/tensorrt-swift", .branch("main")),
+        .package(url: "https://github.com/wendylabsinc/tensorrt-swift", from: "0.0.1"),
     ],
     targets: [
         .executableTarget(
@@ -61,6 +61,12 @@ let package = Package(
         ),
     ]
 )
+```
+
+To track the latest (breaking) changes during development, you can also depend on the `main` branch:
+
+```swift
+.package(url: "https://github.com/wendylabsinc/tensorrt-swift", .branch("main"))
 ```
 
 ### Probe TensorRT availability (dlopen)
