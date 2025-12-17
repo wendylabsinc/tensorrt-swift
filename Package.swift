@@ -21,6 +21,7 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedLibrary("nvinfer", .when(platforms: [.linux])),
+                .linkedLibrary("nvinfer_plugin", .when(platforms: [.linux])),
                 .linkedLibrary("cuda", .when(platforms: [.linux])),
                 .linkedLibrary("dl", .when(platforms: [.linux])),
             ]
