@@ -61,6 +61,16 @@ int trt_build_dual_profile_identity_engine_f32(
   size_t* outSize
 );
 
+// Builds a TensorRT engine from an ONNX file on disk.
+// Returns 0 on success and fills a serialized engine plan buffer to be freed with trt_free().
+int trt_build_engine_from_onnx_file(
+  const char* onnxPath,
+  int32_t enableFp16,
+  size_t workspaceSizeBytes,
+  uint8_t** outData,
+  size_t* outSize
+);
+
 // Frees buffers returned by TensorRTNative shim (malloc/free).
 void trt_free(void* ptr);
 
