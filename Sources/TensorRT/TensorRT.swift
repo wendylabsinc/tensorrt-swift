@@ -11,6 +11,8 @@ import TensorRTNative
 /// public surface; the underlying CUDA/TensorRT bindings are intentionally left unimplemented.
 /// When wiring to TensorRT, prefer Swift 6.2 interop features (C++ interop, `Span`, and inline
 /// arrays) to minimize copies and keep ABI boundaries thin.
+///
+/// - Important: This package is a work in progress and is expected to have breaking API changes.
 public enum TensorRT {}
 
 // MARK: - Errors
@@ -57,6 +59,11 @@ public enum TensorRTError: LocalizedError, Sendable {
 // MARK: - Tensor descriptions
 
 /// Describes a tensor's dimensions.
+///
+/// TensorRT shapes typically have rank ≤ 8, so this type stores dimensions inline (see `InlineArray`)
+/// to avoid heap allocations in common paths like IO reflection and per-inference metadata.
+///
+/// Use non-positive values to represent dynamic axes (for example batch dimension `-1`).
 public struct TensorShape: Hashable, Sendable {
     public static let maxRank = 8
 
@@ -133,6 +140,8 @@ public extension TensorShape {
 }
 
 /// Describes a tensor's explicit element strides.
+///
+/// Strides are stored inline (like `TensorShape`) to keep descriptors allocation-free.
 public struct TensorStrides: Hashable, Sendable {
     public static let maxRank = TensorShape.maxRank
 
@@ -235,6 +244,9 @@ public enum MemoryLocation: Sendable {
 }
 
 /// Metadata describing a named tensor binding.
+///
+/// `TensorDescriptor` mirrors a TensorRT IO tensor/binding: name, shape, scalar element type, and
+/// (optionally) layout/strides and quantization metadata.
 public struct TensorDescriptor: Hashable, Sendable {
     public var name: String
     public var shape: TensorShape
@@ -348,6 +360,11 @@ public struct TensorBinding: Identifiable, Hashable, Sendable {
 }
 
 /// Value container passed to and from execution contexts.
+///
+/// `TensorValue` couples a `TensorDescriptor` (what this tensor *is*) with storage (where the bytes live).
+///
+/// - Note: Not all storage variants are wired to TensorRT yet. Today, end-to-end execution supports
+///   host-backed payloads (`.host(Data)` and `.deferred`).
 public struct TensorValue: Sendable {
     public enum Storage: Sendable {
         case host(Data)
@@ -372,6 +389,8 @@ public struct TensorValue: Sendable {
 }
 
 /// Batch of named tensor inputs.
+///
+/// Input values are keyed by tensor/binding name.
 public struct InferenceBatch: Sendable {
     public var inputs: [String: TensorValue]
     public var profileName: String?
@@ -627,6 +646,10 @@ public struct Logger: Sendable {
 // MARK: - Runtime and engine
 
 /// Entry point for loading and building TensorRT engines.
+///
+/// Use `TensorRTRuntime` to:
+/// - Deserialize serialized TensorRT plans (`.deserializeEngine(from:)`)
+/// - Build engines from higher-level network definitions (not yet implemented)
 public struct TensorRTRuntime: Sendable {
     public var logger: Logger
     private var native: TensorRTNativeInterface
@@ -673,6 +696,11 @@ public struct TensorRTRuntime: Sendable {
 }
 
 /// Represents a compiled TensorRT engine.
+///
+/// `Engine` is a lightweight value wrapper around the engine's IO surface (`EngineDescription`) and,
+/// optionally, a serialized plan (`serialized`) and/or an opaque native handle (`nativeHandle`).
+///
+/// Today, `ExecutionContext` executes using `serialized` plan bytes (host buffers) via the native shim.
 public struct Engine: Sendable {
     public var description: EngineDescription
     public var serialized: Data?
@@ -747,6 +775,8 @@ public struct MemoryAllocator: Sendable {
 }
 
 /// Stateful executor that owns resources for repeated inference calls.
+///
+/// This protocol exists to allow swapping in a mock executor in tests.
 public protocol ExecutionContexting: Sendable {
     func enqueue(_ batch: InferenceBatch, synchronously: Bool) async throws -> InferenceResult
     func setOptimizationProfile(_ profile: OptimizationProfile) async throws
@@ -920,8 +950,8 @@ public actor ExecutionContext: ExecutionContexting {
 
     /// Enqueues a single Float32 input and writes a single Float32 output into a caller-provided buffer.
     ///
-    /// This overload avoids allocating intermediate `Data` wrappers and uses Swift 6.2 `Span`/`MutableSpan`
-    /// at the API boundary.
+    /// This convenience API is useful for simple single-input/single-output engines and avoids wrapping
+    /// payloads in `TensorValue` / `Data` when you already have `[Float]` buffers.
     public func enqueueF32(
         inputName: String,
         input: [Float],
@@ -1025,6 +1055,9 @@ public actor ExecutionContext: ExecutionContexting {
     }
 
     /// Enqueues a single byte-addressed input and writes a single output into a caller-provided byte buffer.
+    ///
+    /// This is a low-level helper for engines with non-`Float32` IO (or callers that already have
+    /// pre-packed bytes).
     public func enqueueBytes(
         inputName: String,
         input: [UInt8],

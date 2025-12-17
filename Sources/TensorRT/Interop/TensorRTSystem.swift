@@ -42,6 +42,9 @@ public enum TensorRTSystem {
 
     /// Builds a small serialized FP32 engine plan for a trivial identity network.
     ///
+    /// - Note: Once `OutputSpan`-based container initializers are available in the toolchain,
+    ///   this can be updated to initialize the return buffer without using an "unsafe uninitialized"
+    ///   closure.
     public static func buildIdentityEnginePlanBytes(elementCount: Int = 8) throws -> [UInt8] {
         var rawPtr: UnsafeMutablePointer<UInt8>?
         var size: Int = 0
