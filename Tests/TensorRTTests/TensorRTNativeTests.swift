@@ -47,6 +47,64 @@ import TensorRTNative
     #expect(output == input)
 }
 
+@Test("Build engine from ONNX and execute") func tensorRTBuildFromONNX() async throws {
+    // A minimal ONNX identity model (opset 13) with input/output [1,8] float.
+    let onnxBase64 = "CAc6XQoZCgVpbnB1dBIGb3V0cHV0IghJZGVudGl0eRINSWRlbnRpdHlHcmFwaFoXCgVpbnB1dBIOCgwIARIICgIIAQoCCAhiGAoGb3V0cHV0Eg4KDAgBEggKAggBCgIICEIECgAQDQ=="
+    guard let onnxData = Data(base64Encoded: onnxBase64) else {
+        throw TensorRTError.runtimeUnavailable("Failed to decode embedded ONNX fixture.")
+    }
+
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tensorrt-swift-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmpURL, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    let onnxURL = tmpURL.appendingPathComponent("identity.onnx")
+    try onnxData.write(to: onnxURL)
+
+    let runtime = TensorRTRuntime()
+    let engine = try runtime.buildEngine(onnxURL: onnxURL, options: EngineBuildOptions(precision: [.fp32]))
+    #expect(engine.serialized != nil)
+    #expect(engine.description.inputs.count == 1)
+    #expect(engine.description.outputs.count == 1)
+
+    let input: [Float] = (0..<8).map(Float.init)
+    let inputData = input.withUnsafeBufferPointer { buffer in
+        Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+    }
+
+    let context = try engine.makeExecutionContext()
+    let inputDescriptor = engine.description.inputs[0].descriptor
+
+    let batch = InferenceBatch(
+        inputs: [
+            inputDescriptor.name: TensorValue(descriptor: inputDescriptor, storage: .host(inputData)),
+        ]
+    )
+
+    let result = try await context.enqueue(batch, synchronously: true)
+    guard let outputValue = result.outputs[engine.description.outputs[0].name] else {
+        throw TensorRTError.invalidBinding("Missing output tensor")
+    }
+
+    let outputData: Data
+    switch outputValue.storage {
+    case .host(let data):
+        outputData = data
+    default:
+        throw TensorRTError.notImplemented("Expected host output from ONNX identity inference")
+    }
+
+    var output = [Float](repeating: 0, count: input.count)
+    output.withUnsafeMutableBytes { outBytes in
+        outputData.withUnsafeBytes { inBytes in
+            outBytes.copyBytes(from: inBytes.prefix(outBytes.count))
+        }
+    }
+
+    #expect(output == input)
+}
+
 @Test("TensorRT runtime create/destroy") func tensorRTRuntimeLifecycle() async throws {
     _ = try TensorRTSystem.Runtime()
     #expect(true)

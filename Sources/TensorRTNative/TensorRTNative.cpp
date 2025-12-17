@@ -4,6 +4,7 @@
 #include <NvInfer.h>
 #include <NvInferPlugin.h>
 #include <NvInferVersion.h>
+#include <NvOnnxParser.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -598,6 +599,88 @@ int trt_build_dual_profile_identity_engine_f32(
   if (!buffer) {
     trtDestroy(serialized);
     return 12;
+  }
+  std::memcpy(buffer, serialized->data(), serialized->size());
+  *outData = reinterpret_cast<uint8_t*>(buffer);
+  *outSize = serialized->size();
+  trtDestroy(serialized);
+  return 0;
+}
+
+int trt_build_engine_from_onnx_file(
+  const char* onnxPath,
+  int32_t enableFp16,
+  size_t workspaceSizeBytes,
+  uint8_t** outData,
+  size_t* outSize
+) {
+  if (!onnxPath || onnxPath[0] == '\0' || !outData || !outSize) {
+    return 1;
+  }
+
+  *outData = nullptr;
+  *outSize = 0;
+
+  (void)trt_plugins_initialize();
+
+  nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(logger());
+  if (!builder) {
+    return 2;
+  }
+
+  uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+  nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
+  if (!network) {
+    trtDestroy(builder);
+    return 3;
+  }
+
+  auto* parser = nvonnxparser::createParser(*network, logger());
+  if (!parser) {
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 4;
+  }
+
+  // Use warning level to avoid noisy logs (we use a silent logger anyway).
+  bool parsed = parser->parseFromFile(onnxPath, static_cast<int>(nvinfer1::ILogger::Severity::kWARNING));
+  if (!parsed) {
+    trtDestroy(parser);
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 5;
+  }
+
+  nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
+  if (!config) {
+    trtDestroy(parser);
+    trtDestroy(network);
+    trtDestroy(builder);
+    return 6;
+  }
+
+  size_t workspace = workspaceSizeBytes != 0 ? workspaceSizeBytes : (1U << 28); // 256MB default
+  config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, workspace);
+
+  if (enableFp16 != 0) {
+    config->setFlag(nvinfer1::BuilderFlag::kFP16);
+  }
+
+  nvinfer1::IHostMemory* serialized = builder->buildSerializedNetwork(*network, *config);
+  trtDestroy(config);
+  trtDestroy(parser);
+  trtDestroy(network);
+  trtDestroy(builder);
+
+  if (!serialized || !serialized->data() || serialized->size() == 0) {
+    trtDestroy(serialized);
+    return 7;
+  }
+
+  void* buffer = std::malloc(serialized->size());
+  if (!buffer) {
+    trtDestroy(serialized);
+    return 8;
   }
   std::memcpy(buffer, serialized->data(), serialized->size());
   *outData = reinterpret_cast<uint8_t*>(buffer);

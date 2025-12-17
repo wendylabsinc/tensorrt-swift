@@ -1703,7 +1703,36 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
     }
 
     public func buildEngine(onnxURL: URL, options: EngineBuildOptions) throws -> Engine {
-        throw TensorRTError.notImplemented("Native ONNX build")
+#if canImport(TensorRTNative)
+        // NOTE: For now, build returns serialized plan bytes and we reuse deserializeEngine(...) to
+        // populate the IO description. This is double work but keeps the Swift surface small.
+        var rawPtr: UnsafeMutablePointer<UInt8>?
+        var size: Int = 0
+
+        let enableFp16: Int32 = options.precision.contains(.fp16) ? 1 : 0
+        let workspace = options.workspaceSizeBytes.map { max(0, $0) } ?? 0
+
+        let status = onnxURL.path.withCString { pathPtr in
+            trt_build_engine_from_onnx_file(pathPtr, enableFp16, workspace, &rawPtr, &size)
+        }
+
+        guard status == 0, let rawPtr, size > 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to build engine from ONNX at \(onnxURL.path) (status \(status)).")
+        }
+        defer { trt_free(rawPtr) }
+
+        let plan = Data(bytes: rawPtr, count: size)
+        let loadConfig = EngineLoadConfiguration(
+            device: options.device,
+            logger: .standard,
+            allowRefit: options.allowRefit,
+            initializePlugins: true,
+            pluginLibraries: []
+        )
+        return try deserializeEngine(from: plan, configuration: loadConfig)
+#else
+        throw TensorRTError.notImplemented("Native ONNX build (TensorRTNative module unavailable)")
+#endif
     }
 }
 
