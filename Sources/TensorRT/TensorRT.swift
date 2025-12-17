@@ -803,11 +803,16 @@ public actor ExecutionContext: ExecutionContexting {
     public let allocator: MemoryAllocator
     private var nativeContextHandle: NativeContextHandle?
     private var inputShapes: [String: TensorShape] = [:]
+    private var requestedProfileIndex: Int32 = 0
+    private var appliedProfileIndex: Int32?
 
     public init(engine: Engine, queue: ExecutionQueue, allocator: MemoryAllocator = .default) {
         self.engine = engine
         self.queue = queue
         self.allocator = allocator
+        if let raw = engine.description.metadata["defaultProfileIndex"], let parsed = Int32(raw) {
+            requestedProfileIndex = parsed
+        }
     }
 
     private final class NativeContextHandle: @unchecked Sendable {
@@ -845,12 +850,30 @@ public actor ExecutionContext: ExecutionContexting {
             throw TensorRTError.runtimeUnavailable("Failed to create persistent TensorRT execution context.")
         }
         nativeContextHandle = NativeContextHandle(raw: handle)
+        try applyOptimizationProfileIfNeeded(ctx: handle)
         return handle
     }
 #endif
 
 #if canImport(TensorRTNative)
+    private func applyOptimizationProfileIfNeeded(ctx: UInt) throws {
+        if let appliedProfileIndex, appliedProfileIndex == requestedProfileIndex {
+            return
+        }
+        if !engine.description.profileNames.isEmpty {
+            guard requestedProfileIndex >= 0, Int(requestedProfileIndex) < engine.description.profileNames.count else {
+                throw TensorRTError.profileUnavailable("Profile index \(requestedProfileIndex) out of range (engine has \(engine.description.profileNames.count) profiles).")
+            }
+        }
+        let status = trt_context_set_optimization_profile(ctx, requestedProfileIndex)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to set optimization profile \(requestedProfileIndex) (status \(status)).")
+        }
+        appliedProfileIndex = requestedProfileIndex
+    }
+
     private func applyInputShapesIfNeeded(ctx: UInt) throws {
+        try applyOptimizationProfileIfNeeded(ctx: ctx)
         guard !inputShapes.isEmpty else { return }
         for (name, shape) in inputShapes {
             var dims = [Int32](repeating: 0, count: TensorShape.maxRank)
@@ -913,6 +936,7 @@ public actor ExecutionContext: ExecutionContexting {
         }
 
         let ctx = try getOrCreateNativeContext(plan: plan)
+        try applyOptimizationProfileIfNeeded(ctx: ctx)
 
         // For dynamic inputs, require a concrete shape (via reshape()) so we can validate sizes and
         // allow TensorRT to resolve output shapes.
@@ -1331,12 +1355,42 @@ public actor ExecutionContext: ExecutionContexting {
 
     /// Selects the active optimization profile for the context.
     public func setOptimizationProfile(_ profile: OptimizationProfile) async throws {
-        throw TensorRTError.notImplemented("Optimization profile switching")
+        try await setOptimizationProfile(named: profile.name)
     }
 
     /// Selects the active optimization profile by name.
     public func setOptimizationProfile(named name: String) async throws {
-        throw TensorRTError.notImplemented("Optimization profile switching by name")
+#if canImport(TensorRTNative)
+        func parseIndex(_ raw: String) -> Int32? {
+            if let parsed = Int32(raw) {
+                return parsed
+            }
+            if raw.hasPrefix("profile") {
+                return Int32(raw.dropFirst("profile".count))
+            }
+            return nil
+        }
+
+        let index: Int32
+        if let position = engine.description.profileNames.firstIndex(of: name) {
+            index = Int32(position)
+        } else if let parsed = parseIndex(name) {
+            index = parsed
+        } else {
+            throw TensorRTError.missingOptimizationProfile("No optimization profile named '\(name)'; available: \(engine.description.profileNames)")
+        }
+
+        requestedProfileIndex = index
+        appliedProfileIndex = nil
+
+        if let plan = engine.serialized, let ctx = nativeContextHandle?.raw {
+            _ = plan
+            try applyOptimizationProfileIfNeeded(ctx: ctx)
+            try applyInputShapesIfNeeded(ctx: ctx)
+        }
+#else
+        throw TensorRTError.notImplemented("Optimization profile switching requires TensorRTNative on Linux")
+#endif
     }
 
     /// Reshapes input and output bindings for dynamic shapes.
@@ -1542,6 +1596,18 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
         inputs.reserveCapacity(Int(ioCount))
         outputs.reserveCapacity(Int(ioCount))
 
+        var profileCount: Int32 = 0
+        _ = trt_engine_get_profile_count(handle, &profileCount)
+        let profileNames: [String] = (0..<max(0, Int(profileCount))).map { String($0) }
+
+        var metadata: [String: String] = [:]
+        if let idx = configuration.profileIndex {
+            metadata["defaultProfileIndex"] = String(idx)
+        }
+        if let name = configuration.profile {
+            metadata["defaultProfileName"] = name
+        }
+
         func mapDataType(_ raw: Int32) throws -> TensorDataType {
             // nvinfer1::DataType values (stable across TensorRT versions):
             // kFLOAT=0, kHALF=1, kINT8=2, kINT32=3, kBOOL=4, kUINT8=5, kFP8=6, kBF16=7, kINT64=8, kINT4=9.
@@ -1599,8 +1665,8 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
             workspaceSizeBytes: nil,
             device: configuration.device,
             profiles: [],
-            metadata: [:],
-            profileNames: [],
+            metadata: metadata,
+            profileNames: profileNames,
             planSizeBytes: data.count,
             computeCapability: nil,
             tacticSources: [],

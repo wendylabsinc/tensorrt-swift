@@ -77,6 +77,32 @@ public enum TensorRTSystem {
         return Data(bytes: rawPtr, count: size)
     }
 
+    /// Builds a serialized FP32 identity engine plan with two optimization profiles.
+    ///
+    /// This is primarily intended for tests and early prototyping of runtime profile selection.
+    public static func buildDualProfileIdentityEnginePlanF32(
+        profile0: (min: Int, opt: Int, max: Int),
+        profile1: (min: Int, opt: Int, max: Int)
+    ) throws -> Data {
+        var rawPtr: UnsafeMutablePointer<UInt8>?
+        var size: Int = 0
+        let status = trt_build_dual_profile_identity_engine_f32(
+            Int32(profile0.min),
+            Int32(profile0.opt),
+            Int32(profile0.max),
+            Int32(profile1.min),
+            Int32(profile1.opt),
+            Int32(profile1.max),
+            &rawPtr,
+            &size
+        )
+        guard status == 0, let rawPtr, size > 0 else {
+            throw TensorRTError.notImplemented("Failed to build dual-profile identity engine plan (status \(status)).")
+        }
+        defer { trt_free(rawPtr) }
+        return Data(bytes: rawPtr, count: size)
+    }
+
     /// Builds a small serialized FP32 engine plan for a trivial identity network.
     ///
     /// - Note: Once `OutputSpan`-based container initializers are available in the toolchain,

@@ -163,6 +163,45 @@ import TensorRTNative
     #expect(outDataB.count == inputDataB.count)
 }
 
+@Test("Optimization profile switching enables different shape ranges") func tensorRTOptimizationProfileSwitching() async throws {
+    let plan = try TensorRTSystem.buildDualProfileIdentityEnginePlanF32(
+        profile0: (min: 1, opt: 8, max: 16),
+        profile1: (min: 32, opt: 32, max: 64)
+    )
+    let engine = try TensorRTRuntime().deserializeEngine(from: plan)
+    #expect(engine.description.profileNames.count >= 2)
+
+    let context = try engine.makeExecutionContext()
+    let inputDescriptor = engine.description.inputs[0].descriptor
+
+    func run(count: Int) async throws -> [Float] {
+        let input: [Float] = (0..<count).map(Float.init)
+        let inputData = input.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.stride)
+        }
+        let batch = InferenceBatch(inputs: ["input": TensorValue(descriptor: inputDescriptor, storage: .host(inputData))])
+        let result = try await context.enqueue(batch, synchronously: true)
+        guard let out = result.outputs["output"] else { throw TensorRTError.invalidBinding("Missing output") }
+        guard case .host(let outData) = out.storage else { throw TensorRTError.notImplemented("Expected host output") }
+
+        var output = [Float](repeating: 0, count: count)
+        output.withUnsafeMutableBytes { outBytes in
+            outData.withUnsafeBytes { inBytes in
+                outBytes.copyBytes(from: inBytes.prefix(outBytes.count))
+            }
+        }
+        return output
+    }
+
+    try await context.setOptimizationProfile(named: "0")
+    try await context.reshape(bindings: ["input": TensorShape([8])])
+    #expect(try await run(count: 8) == (0..<8).map(Float.init))
+
+    try await context.setOptimizationProfile(named: "1")
+    try await context.reshape(bindings: ["input": TensorShape([32])])
+    #expect(try await run(count: 32) == (0..<32).map(Float.init))
+}
+
 @Test("Device buffer enqueue executes on GPU") func tensorRTDeviceBufferEnqueue() async throws {
     let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: 8)
     let engine = try TensorRTRuntime().deserializeEngine(from: plan)
