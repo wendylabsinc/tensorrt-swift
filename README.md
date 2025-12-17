@@ -31,6 +31,28 @@ The following public APIs have real integration with the TensorRT system librari
 
 ## Quick Start
 
+### Add the package to your `Package.swift`
+
+```swift
+// swift-tools-version: 6.2
+import PackageDescription
+
+let package = Package(
+    name: "MyApp",
+    dependencies: [
+        .package(url: "https://github.com/wendylabsinc/tensorrt-swift", .branch("main")),
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "TensorRT", package: "tensorrt-swift"),
+            ]
+        ),
+    ]
+)
+```
+
 ### Probe TensorRT availability (dlopen)
 
 ```swift
@@ -70,4 +92,3 @@ swift test
 
 The test suite includes an end-to-end GPU test that builds an identity engine with TensorRT,
 deserializes it, and runs inference.
-
