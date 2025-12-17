@@ -103,6 +103,25 @@ int trt_context_execute_host(
   int32_t outputCount
 );
 
+// Executes using a persistent context with device-resident buffers.
+// Inputs/outputs are interpreted as CUDA device pointers.
+// Returns 0 on success.
+int trt_context_execute_device(
+  uintptr_t ctx,
+  const trt_named_buffer* inputs,
+  int32_t inputCount,
+  const trt_named_mutable_buffer* outputs,
+  int32_t outputCount,
+  int32_t synchronously
+);
+
+// Minimal CUDA driver helpers (for tests and low-level users).
+// These use the CUDA primary context for device 0.
+int trt_cuda_malloc(size_t byteCount, uint64_t* outAddress);
+int trt_cuda_free(uint64_t address);
+int trt_cuda_memcpy_htod(uint64_t dstAddress, const void* src, size_t byteCount);
+int trt_cuda_memcpy_dtoh(void* dst, uint64_t srcAddress, size_t byteCount);
+
 // Runs the identity plan on GPU using CUDA driver API.
 // Returns 0 on success.
 int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* input, int32_t elementCount, float* output);

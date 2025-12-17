@@ -810,6 +810,122 @@ int trt_context_execute_host(
 #endif
 }
 
+int trt_context_execute_device(
+  uintptr_t ctxHandle,
+  const trt_named_buffer* inputs,
+  int32_t inputCount,
+  const trt_named_mutable_buffer* outputs,
+  int32_t outputCount,
+  int32_t synchronously
+) {
+  if (!ctxHandle || !inputs || inputCount < 0 || !outputs || outputCount < 0) {
+    return 1;
+  }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  auto* ctx = reinterpret_cast<PersistentExecutionContext*>(ctxHandle);
+  if (!ctx->exec) {
+    return 2;
+  }
+
+  for (int32_t i = 0; i < inputCount; i++) {
+    auto const& in = inputs[i];
+    if (!in.name || !in.data || in.size == 0) {
+      return 3;
+    }
+    if (!ctx->exec->setTensorAddress(in.name, const_cast<void*>(in.data))) {
+      return 4;
+    }
+  }
+
+  for (int32_t i = 0; i < outputCount; i++) {
+    auto const& out = outputs[i];
+    if (!out.name || !out.data || out.size == 0) {
+      return 5;
+    }
+    if (!ctx->exec->setTensorAddress(out.name, out.data)) {
+      return 6;
+    }
+  }
+
+  if (!ctx->exec->enqueueV3(reinterpret_cast<cudaStream_t>(ctx->stream.stream()))) {
+    return 7;
+  }
+
+  if (synchronously != 0) {
+    CUresult cu = cuStreamSynchronize(ctx->stream.stream());
+    if (cu != CUDA_SUCCESS) {
+      return 8;
+    }
+  }
+  return 0;
+#else
+  (void)ctxHandle;
+  (void)inputs;
+  (void)inputCount;
+  (void)outputs;
+  (void)outputCount;
+  (void)synchronously;
+  return 100;
+#endif
+}
+
+int trt_cuda_malloc(size_t byteCount, uint64_t* outAddress) {
+  if (!outAddress || byteCount == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  CUdeviceptr ptr = 0;
+  cu = cuMemAlloc(&ptr, byteCount);
+  if (cu != CUDA_SUCCESS) {
+    return 3;
+  }
+  *outAddress = static_cast<uint64_t>(ptr);
+  return 0;
+}
+
+int trt_cuda_free(uint64_t address) {
+  if (address == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuMemFree(static_cast<CUdeviceptr>(address));
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_memcpy_htod(uint64_t dstAddress, const void* src, size_t byteCount) {
+  if (dstAddress == 0 || !src || byteCount == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuMemcpyHtoD(static_cast<CUdeviceptr>(dstAddress), src, byteCount);
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
+int trt_cuda_memcpy_dtoh(void* dst, uint64_t srcAddress, size_t byteCount) {
+  if (!dst || srcAddress == 0 || byteCount == 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init();
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuMemcpyDtoH(dst, static_cast<CUdeviceptr>(srcAddress), byteCount);
+  return (cu == CUDA_SUCCESS) ? 0 : 3;
+}
+
 int trt_context_set_input_shape(uintptr_t ctxHandle, const char* inputName, const int32_t* dims, int32_t nbDims) {
   if (!ctxHandle || !inputName || !dims || nbDims <= 0) {
     return 1;

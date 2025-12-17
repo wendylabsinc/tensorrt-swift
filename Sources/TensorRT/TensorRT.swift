@@ -1215,6 +1215,81 @@ public actor ExecutionContext: ExecutionContexting {
 #endif
     }
 
+    /// Enqueues using device-resident buffers (CUDA device pointers).
+    ///
+    /// This is the lowest-level execution API and is intended for performance-sensitive pipelines where
+    /// inputs/outputs already live on the GPU. The provided `address` values must be valid CUDA device
+    /// pointers for the active device.
+    public func enqueueDevice(
+        inputs: [String: (address: UInt64, length: Int)],
+        outputs: [String: (address: UInt64, length: Int)],
+        synchronously: Bool = true
+    ) async throws {
+#if canImport(TensorRTNative)
+        guard let plan = engine.serialized else {
+            throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
+        }
+        let ctx = try getOrCreateNativeContext(plan: plan)
+        try applyInputShapesIfNeeded(ctx: ctx)
+
+        func withCStringPointers<R>(_ strings: [String], _ body: ([UnsafePointer<CChar>]) throws -> R) rethrows -> R {
+            var allocations: [UnsafeMutablePointer<CChar>] = []
+            allocations.reserveCapacity(strings.count)
+            defer { allocations.forEach { $0.deallocate() } }
+
+            let pointers: [UnsafePointer<CChar>] = strings.map { string in
+                let utf8 = Array(string.utf8CString)
+                let ptr = UnsafeMutablePointer<CChar>.allocate(capacity: utf8.count)
+                ptr.initialize(from: utf8, count: utf8.count)
+                allocations.append(ptr)
+                return UnsafePointer(ptr)
+            }
+            return try body(pointers)
+        }
+
+        let inputNames = Array(inputs.keys)
+        let outputNames = Array(outputs.keys)
+        try withCStringPointers(inputNames + outputNames) { namePtrs in
+            var inputBuffers: [trt_named_buffer] = []
+            inputBuffers.reserveCapacity(inputNames.count)
+            for (i, name) in inputNames.enumerated() {
+                guard let spec = inputs[name] else { continue }
+                guard spec.address != 0, spec.length > 0 else {
+                    throw TensorRTError.invalidBinding("Invalid device input buffer for \(name).")
+                }
+                let ptr = UnsafeRawPointer(bitPattern: UInt(spec.address))
+                inputBuffers.append(trt_named_buffer(name: namePtrs[i], data: ptr, size: spec.length))
+            }
+
+            var outputBuffers: [trt_named_mutable_buffer] = []
+            outputBuffers.reserveCapacity(outputNames.count)
+            let offset = inputNames.count
+            for (i, name) in outputNames.enumerated() {
+                guard let spec = outputs[name] else { continue }
+                guard spec.address != 0, spec.length > 0 else {
+                    throw TensorRTError.invalidBinding("Invalid device output buffer for \(name).")
+                }
+                let ptr = UnsafeMutableRawPointer(bitPattern: UInt(spec.address))
+                outputBuffers.append(trt_named_mutable_buffer(name: namePtrs[offset + i], data: ptr, size: spec.length))
+            }
+
+            let status = trt_context_execute_device(
+                ctx,
+                inputBuffers,
+                Int32(inputBuffers.count),
+                outputBuffers,
+                Int32(outputBuffers.count),
+                synchronously ? 1 : 0
+            )
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("TensorRT device enqueue failed (status \(status)).")
+            }
+        }
+#else
+        throw TensorRTError.notImplemented("enqueueDevice requires TensorRTNative on Linux")
+#endif
+    }
+
     /// Selects the active optimization profile for the context.
     public func setOptimizationProfile(_ profile: OptimizationProfile) async throws {
         throw TensorRTError.notImplemented("Optimization profile switching")
