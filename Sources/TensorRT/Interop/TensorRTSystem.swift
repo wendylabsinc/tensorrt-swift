@@ -40,14 +40,34 @@ public enum TensorRTSystem {
         return Data(bytes: rawPtr, count: size)
     }
 
+    /// Builds a small serialized FP32 engine plan for a trivial identity network.
+    ///
+    public static func buildIdentityEnginePlanBytes(elementCount: Int = 8) throws -> [UInt8] {
+        var rawPtr: UnsafeMutablePointer<UInt8>?
+        var size: Int = 0
+        let status = trt_build_identity_engine_f32(Int32(elementCount), &rawPtr, &size)
+        guard status == 0, let rawPtr, size > 0 else {
+            throw TensorRTError.notImplemented("Failed to build identity engine plan (status \(status)).")
+        }
+        defer { trt_free(rawPtr) }
+
+        return Array(unsafeUninitializedCapacity: size) { buffer, count in
+            if let base = buffer.baseAddress {
+                base.initialize(from: rawPtr, count: size)
+            }
+            count = size
+        }
+    }
+
     /// Executes an identity plan on the GPU and returns the output.
     public static func runIdentityPlanF32(plan: Data, input: [Float]) throws -> [Float] {
         guard !input.isEmpty else { return [] }
         var output = Array<Float>(repeating: 0, count: input.count)
 
-        let status: Int32 = plan.withUnsafeBytes { planBytes in
-            input.withUnsafeBufferPointer { inputPtr in
-                output.withUnsafeMutableBufferPointer { outputPtr in
+        let status: Int32 = plan.bytes.withUnsafeBytes { planBytes in
+            input.span.withUnsafeBufferPointer { inputPtr in
+                var outputSpan = output.mutableSpan
+                return outputSpan.withUnsafeMutableBufferPointer { outputPtr in
                     trt_run_identity_plan_f32(
                         planBytes.baseAddress,
                         planBytes.count,

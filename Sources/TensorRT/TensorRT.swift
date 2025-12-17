@@ -132,6 +132,47 @@ public extension TensorShape {
     }
 }
 
+/// Describes a tensor's explicit element strides.
+public struct TensorStrides: Hashable, Sendable {
+    public static let maxRank = TensorShape.maxRank
+
+    public var rank: Int
+    public typealias InlineStrides = [8 of Int32]
+    public var strides: InlineStrides
+
+    public init(_ values: [Int]) {
+        self.rank = min(Self.maxRank, values.count)
+        self.strides = InlineStrides(repeating: 0)
+        for index in 0..<rank {
+            self.strides[index] = Int32(values[index])
+        }
+    }
+
+    public init(rank: Int, strides: InlineStrides) {
+        self.rank = min(Self.maxRank, max(0, rank))
+        self.strides = strides
+    }
+
+    public var values: [Int] {
+        (0..<rank).map { Int(strides[$0]) }
+    }
+
+    public static func == (lhs: TensorStrides, rhs: TensorStrides) -> Bool {
+        guard lhs.rank == rhs.rank else { return false }
+        for index in 0..<TensorStrides.maxRank {
+            if lhs.strides[index] != rhs.strides[index] { return false }
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(rank)
+        for index in 0..<TensorStrides.maxRank {
+            hasher.combine(strides[index])
+        }
+    }
+}
+
 /// Supported tensor element types.
 public enum TensorDataType: String, CaseIterable, Sendable {
     case float32
@@ -182,7 +223,7 @@ public enum TensorFormat: Hashable, Sendable {
     case nhwc
     case chw2
     case chw32
-    case strided([Int])
+    case strided(TensorStrides)
 }
 
 /// Where the tensor memory lives.
@@ -200,7 +241,7 @@ public struct TensorDescriptor: Hashable, Sendable {
     public var dataType: TensorDataType
     public var format: TensorFormat
     public var dynamicAxes: [Int: TensorShape.DynamicAxisRange]
-    public var strides: [Int]?
+    public var strides: TensorStrides?
     public var quantization: QuantizationParameters?
 
     /// Creates a descriptor for a TensorRT binding.
@@ -210,7 +251,7 @@ public struct TensorDescriptor: Hashable, Sendable {
     ///   - dataType: Scalar type stored in the tensor.
     ///   - format: Optional layout hint. Defaults to `.linear`.
     ///   - dynamicAxes: Optional ranges for dynamic axes by index.
-    ///   - strides: Optional explicit strides for strided layouts.
+    ///   - strides: Optional explicit element strides for strided layouts.
     ///   - quantization: Optional quantization parameters (scales, zero-points, per-channel axis).
     public init(
         name: String,
@@ -218,7 +259,7 @@ public struct TensorDescriptor: Hashable, Sendable {
         dataType: TensorDataType,
         format: TensorFormat = .linear,
         dynamicAxes: [Int: TensorShape.DynamicAxisRange] = [:],
-        strides: [Int]? = nil,
+        strides: TensorStrides? = nil,
         quantization: QuantizationParameters? = nil
     ) {
         self.name = name
@@ -874,6 +915,205 @@ public actor ExecutionContext: ExecutionContexting {
         return InferenceResult(outputs: outputs, duration: nil, metadata: [:], profileUsed: batch.profileName)
 #else
         throw TensorRTError.notImplemented("Inference enqueue requires TensorRTNative on Linux")
+#endif
+    }
+
+    /// Enqueues a single Float32 input and writes a single Float32 output into a caller-provided buffer.
+    ///
+    /// This overload avoids allocating intermediate `Data` wrappers and uses Swift 6.2 `Span`/`MutableSpan`
+    /// at the API boundary.
+    public func enqueueF32(
+        inputName: String,
+        input: [Float],
+        outputName: String,
+        output: inout [Float],
+        synchronously: Bool = true
+    ) async throws {
+#if canImport(TensorRTNative)
+        guard let plan = engine.serialized else {
+            throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
+        }
+
+        guard let inputBinding = engine.description.inputs.first(where: { $0.name == inputName }) else {
+            throw TensorRTError.invalidBinding("No input binding named \(inputName).")
+        }
+        guard let outputBinding = engine.description.outputs.first(where: { $0.name == outputName }) else {
+            throw TensorRTError.invalidBinding("No output binding named \(outputName).")
+        }
+
+        guard inputBinding.descriptor.dataType == .float32 else {
+            throw TensorRTError.unsupportedPrecision("enqueueF32 requires Float32 input for \(inputName).")
+        }
+        guard outputBinding.descriptor.dataType == .float32 else {
+            throw TensorRTError.unsupportedPrecision("enqueueF32 requires Float32 output for \(outputName).")
+        }
+
+        let expectedInputElements = inputBinding.descriptor.shape.elementCount
+        guard expectedInputElements > 0 else {
+            throw TensorRTError.invalidShapeRange("Input \(inputName) has dynamic shape; reshape() is not implemented yet.")
+        }
+        guard input.count == expectedInputElements else {
+            throw TensorRTError.shapeMismatch(
+                expected: inputBinding.descriptor.shape,
+                received: TensorShape([input.count])
+            )
+        }
+
+        guard !outputBinding.descriptor.shape.isDynamic else {
+            throw TensorRTError.invalidShapeRange("Output \(outputName) has dynamic shape; reshape() is not implemented yet.")
+        }
+        let expectedOutputElements = outputBinding.descriptor.shape.elementCount
+        if output.count != expectedOutputElements {
+            output = Array(repeating: 0, count: expectedOutputElements)
+        }
+
+        func withCString<R>(_ string: String, _ body: (UnsafePointer<CChar>) throws -> R) rethrows -> R {
+            let utf8 = Array(string.utf8CString)
+            return try utf8.withUnsafeBufferPointer { buffer in
+                try body(buffer.baseAddress!)
+            }
+        }
+
+        try withCString(inputName) { inputNamePtr in
+            try withCString(outputName) { outputNamePtr in
+                try input.withUnsafeBufferPointer { inBuf in
+                    var outArray = output
+                    let status: Int32 = try outArray.withUnsafeMutableBufferPointer { outBuf in
+                        guard let inBase = inBuf.baseAddress else {
+                            throw TensorRTError.invalidBinding("Input span has no base address.")
+                        }
+                        guard let outBase = outBuf.baseAddress else {
+                            throw TensorRTError.invalidBinding("Output buffer has no base address.")
+                        }
+
+                        var inputBuffer = trt_named_buffer(
+                            name: inputNamePtr,
+                            data: UnsafeRawPointer(inBase),
+                            size: inBuf.count * MemoryLayout<Float>.stride
+                        )
+                        var outputBuffer = trt_named_mutable_buffer(
+                            name: outputNamePtr,
+                            data: UnsafeMutableRawPointer(outBase),
+                            size: outBuf.count * MemoryLayout<Float>.stride
+                        )
+
+                        return plan.withUnsafeBytes { planBytes in
+                            withUnsafePointer(to: &inputBuffer) { inputPtr in
+                                withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                    trt_execute_plan_host(
+                                        planBytes.baseAddress,
+                                        planBytes.count,
+                                        inputPtr,
+                                        1,
+                                        outputPtr,
+                                        1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    output = outArray
+                    guard status == 0 else {
+                        throw TensorRTError.runtimeUnavailable("TensorRT enqueue failed (status \(status)).")
+                    }
+                }
+            }
+        }
+#else
+        throw TensorRTError.notImplemented("enqueueF32 requires TensorRTNative on Linux")
+#endif
+    }
+
+    /// Enqueues a single byte-addressed input and writes a single output into a caller-provided byte buffer.
+    public func enqueueBytes(
+        inputName: String,
+        input: [UInt8],
+        outputName: String,
+        output: inout [UInt8],
+        synchronously: Bool = true
+    ) async throws {
+#if canImport(TensorRTNative)
+        guard let plan = engine.serialized else {
+            throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
+        }
+
+        guard let inputBinding = engine.description.inputs.first(where: { $0.name == inputName }) else {
+            throw TensorRTError.invalidBinding("No input binding named \(inputName).")
+        }
+        guard let outputBinding = engine.description.outputs.first(where: { $0.name == outputName }) else {
+            throw TensorRTError.invalidBinding("No output binding named \(outputName).")
+        }
+
+        let expectedInputBytes = inputBinding.descriptor.shape.elementCount * inputBinding.descriptor.dataType.byteCount
+        guard expectedInputBytes > 0 else {
+            throw TensorRTError.invalidShapeRange("Input \(inputName) has dynamic shape; reshape() is not implemented yet.")
+        }
+        guard input.count == expectedInputBytes else {
+            throw TensorRTError.invalidBinding("Input \(inputName) expected \(expectedInputBytes) bytes, got \(input.count).")
+        }
+
+        let expectedOutputBytes = outputBinding.descriptor.shape.elementCount * outputBinding.descriptor.dataType.byteCount
+        guard expectedOutputBytes > 0 else {
+            throw TensorRTError.invalidShapeRange("Output \(outputName) has dynamic shape; reshape() is not implemented yet.")
+        }
+        if output.count != expectedOutputBytes {
+            output = Array(repeating: 0, count: expectedOutputBytes)
+        }
+
+        func withCString<R>(_ string: String, _ body: (UnsafePointer<CChar>) throws -> R) rethrows -> R {
+            let utf8 = Array(string.utf8CString)
+            return try utf8.withUnsafeBufferPointer { buffer in
+                try body(buffer.baseAddress!)
+            }
+        }
+
+        try withCString(inputName) { inputNamePtr in
+            try withCString(outputName) { outputNamePtr in
+                try input.withUnsafeBufferPointer { inBuf in
+                    var outArray = output
+                    let status: Int32 = try outArray.withUnsafeMutableBufferPointer { outBuf in
+                        guard let inBase = inBuf.baseAddress else {
+                            throw TensorRTError.invalidBinding("Input span has no base address.")
+                        }
+                        guard let outBase = outBuf.baseAddress else {
+                            throw TensorRTError.invalidBinding("Output buffer has no base address.")
+                        }
+
+                        var inputBuffer = trt_named_buffer(
+                            name: inputNamePtr,
+                            data: UnsafeRawPointer(inBase),
+                            size: inBuf.count
+                        )
+                        var outputBuffer = trt_named_mutable_buffer(
+                            name: outputNamePtr,
+                            data: UnsafeMutableRawPointer(outBase),
+                            size: outBuf.count
+                        )
+
+                        return plan.withUnsafeBytes { planBytes in
+                            withUnsafePointer(to: &inputBuffer) { inputPtr in
+                                withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                    trt_execute_plan_host(
+                                        planBytes.baseAddress,
+                                        planBytes.count,
+                                        inputPtr,
+                                        1,
+                                        outputPtr,
+                                        1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    output = outArray
+                    guard status == 0 else {
+                        throw TensorRTError.runtimeUnavailable("TensorRT enqueue failed (status \(status)).")
+                    }
+                }
+            }
+        }
+#else
+        throw TensorRTError.notImplemented("enqueueBytes requires TensorRTNative on Linux")
 #endif
     }
 
