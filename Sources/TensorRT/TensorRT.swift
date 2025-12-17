@@ -1298,6 +1298,25 @@ public actor ExecutionContext: ExecutionContexting {
 #endif
     }
 
+    /// Records a CUDA event on this context's underlying stream.
+    ///
+    /// Use this to wait for completion without synchronizing the whole stream. This is most useful
+    /// with `ExecutionQueue.external` and `enqueueDevice(..., synchronously: false)`.
+    public func recordEvent(_ event: TensorRTSystem.CUDAEvent) async throws {
+#if canImport(TensorRTNative)
+        guard let plan = engine.serialized else {
+            throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
+        }
+        let ctx = try getOrCreateNativeContext(plan: plan)
+        let status = trt_context_record_event(ctx, event.rawValue)
+        guard status == 0 else {
+            throw TensorRTError.runtimeUnavailable("Failed to record event on context stream (status \(status)).")
+        }
+#else
+        throw TensorRTError.notImplemented("recordEvent requires TensorRTNative on Linux")
+#endif
+    }
+
     /// Selects the active optimization profile for the context.
     public func setOptimizationProfile(_ profile: OptimizationProfile) async throws {
         throw TensorRTError.notImplemented("Optimization profile switching")

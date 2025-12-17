@@ -135,5 +135,46 @@ public enum TensorRTSystem {
             trt_destroy_builder(handle)
         }
     }
+
+    /// RAII wrapper around a CUDA event (CUDA Driver API).
+    public final class CUDAEvent: @unchecked Sendable {
+        public let rawValue: UInt64
+
+        public init() throws {
+            var ev: UInt64 = 0
+            let status = trt_cuda_event_create(&ev)
+            guard status == 0, ev != 0 else {
+                throw TensorRTError.runtimeUnavailable("Failed to create CUDA event (status \(status)).")
+            }
+            self.rawValue = ev
+        }
+
+        deinit {
+            _ = trt_cuda_event_destroy(rawValue)
+        }
+
+        public func record(on stream: UInt64) throws {
+            let status = trt_cuda_event_record(rawValue, stream)
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("Failed to record CUDA event (status \(status)).")
+            }
+        }
+
+        public func synchronize() throws {
+            let status = trt_cuda_event_synchronize(rawValue)
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("Failed to synchronize CUDA event (status \(status)).")
+            }
+        }
+
+        public func isReady() throws -> Bool {
+            var ready: Int32 = 0
+            let status = trt_cuda_event_query(rawValue, &ready)
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("Failed to query CUDA event (status \(status)).")
+            }
+            return ready != 0
+        }
+    }
 }
 #endif

@@ -224,4 +224,50 @@ import TensorRTNative
     #expect(output == input)
 }
 
+@Test("CUDA event signals completion without stream sync") func tensorRTCudaEventCompletion() async throws {
+    let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: 8)
+    let engine = try TensorRTRuntime().deserializeEngine(from: plan)
+
+    var stream: UInt64 = 0
+    #expect(trt_cuda_stream_create(&stream) == 0)
+    defer { _ = trt_cuda_stream_destroy(stream) }
+
+    let context = try engine.makeExecutionContext(queue: .external(streamIdentifier: stream))
+
+    let input: [Float] = (0..<8).map(Float.init)
+    let byteCount = input.count * MemoryLayout<Float>.stride
+
+    var dIn: UInt64 = 0
+    var dOut: UInt64 = 0
+    #expect(trt_cuda_malloc(byteCount, &dIn) == 0)
+    #expect(trt_cuda_malloc(byteCount, &dOut) == 0)
+    defer {
+        _ = trt_cuda_free(dOut)
+        _ = trt_cuda_free(dIn)
+    }
+
+    input.withUnsafeBytes { raw in
+        #expect(trt_cuda_memcpy_htod(dIn, raw.baseAddress, raw.count) == 0)
+    }
+
+    try await context.enqueueDevice(
+        inputs: ["input": (address: dIn, length: byteCount)],
+        outputs: ["output": (address: dOut, length: byteCount)],
+        synchronously: false
+    )
+
+    let event = try TensorRTSystem.CUDAEvent()
+    try await context.recordEvent(event)
+    _ = try event.isReady()
+
+    try event.synchronize()
+
+    var output = [Float](repeating: 0, count: input.count)
+    output.withUnsafeMutableBytes { raw in
+        #expect(trt_cuda_memcpy_dtoh(raw.baseAddress, dOut, raw.count) == 0)
+    }
+
+    #expect(output == input)
+}
+
 #endif

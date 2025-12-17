@@ -123,6 +123,16 @@ int trt_context_execute_device(
 int trt_cuda_stream_create(uint64_t* outStream);
 int trt_cuda_stream_destroy(uint64_t stream);
 int trt_cuda_stream_synchronize(uint64_t stream);
+
+int trt_cuda_event_create(uint64_t* outEvent);
+int trt_cuda_event_destroy(uint64_t event);
+int trt_cuda_event_record(uint64_t event, uint64_t stream);
+int trt_cuda_event_synchronize(uint64_t event);
+int trt_cuda_event_query(uint64_t event, int32_t* outReady);
+
+// Records an event on the context's CUDA stream.
+int trt_context_record_event(uintptr_t ctx, uint64_t event);
+
 int trt_cuda_malloc(size_t byteCount, uint64_t* outAddress);
 int trt_cuda_free(uint64_t address);
 int trt_cuda_memcpy_htod(uint64_t dstAddress, const void* src, size_t byteCount);
