@@ -179,17 +179,17 @@ import TensorRTNative
 
 @Test("TensorRT runtime create/destroy") func tensorRTRuntimeLifecycle() async throws {
     _ = try TensorRTSystem.Runtime()
-    #expect(true)
+    #expect(Bool(true))
 }
 
 @Test("TensorRT builder create/destroy") func tensorRTBuilderLifecycle() async throws {
     _ = try TensorRTSystem.Builder()
-    #expect(true)
+    #expect(Bool(true))
 }
 
 @Test("TensorRT plugins initialize") func tensorRTPluginInitialization() async throws {
     try TensorRTSystem.initializePlugins()
-    #expect(true)
+    #expect(Bool(true))
 }
 
 @Test("Loading missing plugin library fails") func tensorRTPluginLoadMissingLibrary() async throws {
@@ -200,9 +200,9 @@ import TensorRTNative
 
     do {
         try TensorRTSystem.loadPluginLibrary(missingPath)
-        #expect(false, "Expected loadPluginLibrary to throw for missing path: \(missingPath)")
+        #expect(Bool(false), "Expected loadPluginLibrary to throw for missing path: \(missingPath)")
     } catch {
-        #expect(true)
+        #expect(Bool(true))
     }
 }
 
@@ -386,7 +386,7 @@ import TensorRTNative
         _ = trt_cuda_free(dIn)
     }
 
-    try input.withUnsafeBytes { raw in
+    input.withUnsafeBytes { raw in
         let status = trt_cuda_memcpy_htod(dIn, raw.baseAddress, raw.count)
         #expect(status == 0)
     }
@@ -398,7 +398,7 @@ import TensorRTNative
     )
 
     var output = [Float](repeating: 0, count: input.count)
-    try output.withUnsafeMutableBytes { raw in
+    output.withUnsafeMutableBytes { raw in
         let status = trt_cuda_memcpy_dtoh(raw.baseAddress, dOut, raw.count)
         #expect(status == 0)
     }
