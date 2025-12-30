@@ -12,6 +12,10 @@ jobs:
     runs-on: [self-hosted, rtx4090]
     
     steps:
+      - name: Clean workspace
+        run: |
+          sudo rm -rf ${{ github.workspace }}/.build || true
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -34,6 +38,11 @@ jobs:
             -w /workspace \
             tensorrt-swift-ci:${{ github.sha }} \
             swift test
+
+      - name: Fix permissions
+        if: always()
+        run: |
+          sudo chown -R $(id -u):$(id -g) ${{ github.workspace }} || true
 
       - name: Cleanup
         if: always()
