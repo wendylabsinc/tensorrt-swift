@@ -1,5 +1,6 @@
 # TensorRT Swift (Linux)
 
+[![CI](https://github.com/wendylabsinc/tensorrt-swift/actions/workflows/ci.yml/badge.svg)](https://github.com/wendylabsinc/tensorrt-swift/actions/workflows/ci.yml)
 ![Swift 6.2+](https://img.shields.io/badge/Swift-6.2%2B-orange)
 ![Linux](https://img.shields.io/badge/Platform-Linux-blue)
 
