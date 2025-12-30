@@ -3,6 +3,7 @@
 [![CI](https://github.com/wendylabsinc/tensorrt-swift/actions/workflows/ci.yml/badge.svg)](https://github.com/wendylabsinc/tensorrt-swift/actions/workflows/ci.yml)
 ![Swift 6.2+](https://img.shields.io/badge/Swift-6.2%2B-orange)
 ![Linux](https://img.shields.io/badge/Platform-Linux-blue)
+![v0.0.3](https://img.shields.io/badge/version-0.0.3-green)
 
 Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT engines on Linux.
 
