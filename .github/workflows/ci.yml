@@ -14,7 +14,8 @@ jobs:
     steps:
       - name: Clean workspace
         run: |
-          sudo rm -rf ${{ github.workspace }}/.build || true
+          sudo rm -rf ${{ github.workspace }}/* ${{ github.workspace }}/.* 2>/dev/null || true
+          sudo rm -rf ${{ github.workspace }} || true
 
       - name: Checkout
         uses: actions/checkout@v4
