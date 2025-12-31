@@ -256,6 +256,84 @@ int trt_cuda_device_count(int32_t* outCount) {
   return 0;
 }
 
+int trt_cuda_mem_get_info(int32_t deviceIndex, size_t* outFree, size_t* outTotal) {
+  if (!outFree || !outTotal || deviceIndex < 0) {
+    return 1;
+  }
+  CudaPrimaryCtxGuard cuda;
+  CUresult cu = cuda.init(deviceIndex);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+  cu = cuMemGetInfo(outFree, outTotal);
+  if (cu != CUDA_SUCCESS) {
+    return 3;
+  }
+  return 0;
+}
+
+int trt_cuda_get_device_properties(int32_t deviceIndex, trt_device_properties* outProps) {
+  if (!outProps || deviceIndex < 0) {
+    return 1;
+  }
+  std::memset(outProps, 0, sizeof(*outProps));
+
+  CUresult cu = cuInit(0);
+  if (cu != CUDA_SUCCESS) {
+    return 2;
+  }
+
+  CUdevice device;
+  cu = cuDeviceGet(&device, deviceIndex);
+  if (cu != CUDA_SUCCESS) {
+    return 3;
+  }
+
+  // Device name
+  cu = cuDeviceGetName(outProps->name, TRT_DEVICE_NAME_MAX, device);
+  if (cu != CUDA_SUCCESS) {
+    return 4;
+  }
+
+  // Compute capability
+  cu = cuDeviceGetAttribute(&outProps->computeCapabilityMajor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
+  if (cu != CUDA_SUCCESS) {
+    return 5;
+  }
+  cu = cuDeviceGetAttribute(&outProps->computeCapabilityMinor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
+  if (cu != CUDA_SUCCESS) {
+    return 6;
+  }
+
+  // Total memory
+  size_t totalMem = 0;
+  cu = cuDeviceTotalMem(&totalMem, device);
+  if (cu != CUDA_SUCCESS) {
+    return 7;
+  }
+  outProps->totalMemory = totalMem;
+
+  // Multiprocessor count
+  cu = cuDeviceGetAttribute(&outProps->multiProcessorCount, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device);
+  if (cu != CUDA_SUCCESS) {
+    return 8;
+  }
+
+  // Max threads per block
+  cu = cuDeviceGetAttribute(&outProps->maxThreadsPerBlock, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK, device);
+  if (cu != CUDA_SUCCESS) {
+    return 9;
+  }
+
+  // Warp size
+  cu = cuDeviceGetAttribute(&outProps->warpSize, CU_DEVICE_ATTRIBUTE_WARP_SIZE, device);
+  if (cu != CUDA_SUCCESS) {
+    return 10;
+  }
+
+  return 0;
+}
+
 uintptr_t trt_create_runtime(void) {
   nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(logger());
   return reinterpret_cast<uintptr_t>(runtime);

@@ -23,6 +23,27 @@ int trt_plugins_load_library(const char* path);
 // Returns 0 on success.
 int trt_cuda_device_count(int32_t* outCount);
 
+// Returns GPU memory info for a device.
+// outFree and outTotal are in bytes.
+// Returns 0 on success.
+int trt_cuda_mem_get_info(int32_t deviceIndex, size_t* outFree, size_t* outTotal);
+
+// Device properties structure.
+#define TRT_DEVICE_NAME_MAX 256
+typedef struct trt_device_properties {
+  char name[TRT_DEVICE_NAME_MAX];
+  int32_t computeCapabilityMajor;
+  int32_t computeCapabilityMinor;
+  size_t totalMemory;
+  int32_t multiProcessorCount;
+  int32_t maxThreadsPerBlock;
+  int32_t warpSize;
+} trt_device_properties;
+
+// Returns device properties for a CUDA device.
+// Returns 0 on success.
+int trt_cuda_get_device_properties(int32_t deviceIndex, trt_device_properties* outProps);
+
 // Creates/destroys a TensorRT runtime (nvinfer1::IRuntime).
 // Returns 0 on failure.
 uintptr_t trt_create_runtime(void);

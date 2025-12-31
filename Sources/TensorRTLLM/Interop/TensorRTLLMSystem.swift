@@ -61,6 +61,145 @@ public enum TensorRTLLMSystem {
         return Int(count)
     }
 
+    /// GPU memory information.
+    public struct MemoryInfo: Sendable {
+        /// Free GPU memory in bytes.
+        public var free: Int
+        /// Total GPU memory in bytes.
+        public var total: Int
+        /// Used GPU memory in bytes.
+        public var used: Int { total - free }
+
+        /// Free memory as a percentage of total.
+        public var freePercentage: Double {
+            guard total > 0 else { return 0 }
+            return Double(free) / Double(total) * 100
+        }
+
+        public init(free: Int, total: Int) {
+            self.free = free
+            self.total = total
+        }
+    }
+
+    /// Returns GPU memory information for a specific device.
+    ///
+    /// Example:
+    /// ```swift
+    /// let memInfo = try TensorRTLLMSystem.memoryInfo(device: 0)
+    /// print("Free: \(memInfo.free / 1_000_000_000) GB")
+    /// print("Total: \(memInfo.total / 1_000_000_000) GB")
+    /// ```
+    public static func memoryInfo(device: Int = 0) throws -> MemoryInfo {
+        var free: Int = 0
+        var total: Int = 0
+        let status = trt_cuda_mem_get_info(Int32(device), &free, &total)
+        guard status == 0 else {
+            throw TensorRTLLMError.runtimeUnavailable("Failed to query GPU memory info (status \(status)).")
+        }
+        return MemoryInfo(free: free, total: total)
+    }
+
+    /// CUDA device properties.
+    public struct DeviceProperties: Sendable {
+        /// Device name (e.g., "NVIDIA GeForce RTX 4090").
+        public var name: String
+        /// Compute capability major version.
+        public var computeCapabilityMajor: Int
+        /// Compute capability minor version.
+        public var computeCapabilityMinor: Int
+        /// Compute capability as a string (e.g., "8.9").
+        public var computeCapability: String {
+            "\(computeCapabilityMajor).\(computeCapabilityMinor)"
+        }
+        /// Total device memory in bytes.
+        public var totalMemory: Int
+        /// Number of streaming multiprocessors.
+        public var multiProcessorCount: Int
+        /// Maximum threads per block.
+        public var maxThreadsPerBlock: Int
+        /// Warp size (typically 32).
+        public var warpSize: Int
+
+        public init(
+            name: String,
+            computeCapabilityMajor: Int,
+            computeCapabilityMinor: Int,
+            totalMemory: Int,
+            multiProcessorCount: Int,
+            maxThreadsPerBlock: Int,
+            warpSize: Int
+        ) {
+            self.name = name
+            self.computeCapabilityMajor = computeCapabilityMajor
+            self.computeCapabilityMinor = computeCapabilityMinor
+            self.totalMemory = totalMemory
+            self.multiProcessorCount = multiProcessorCount
+            self.maxThreadsPerBlock = maxThreadsPerBlock
+            self.warpSize = warpSize
+        }
+    }
+
+    /// Returns properties for a specific CUDA device.
+    ///
+    /// Example:
+    /// ```swift
+    /// let props = try TensorRTLLMSystem.deviceProperties(device: 0)
+    /// print("GPU: \(props.name)")
+    /// print("Compute Capability: \(props.computeCapability)")
+    /// print("Memory: \(props.totalMemory / 1_000_000_000) GB")
+    /// ```
+    public static func deviceProperties(device: Int = 0) throws -> DeviceProperties {
+        var props = trt_device_properties()
+        let status = trt_cuda_get_device_properties(Int32(device), &props)
+        guard status == 0 else {
+            throw TensorRTLLMError.runtimeUnavailable("Failed to query device properties (status \(status)).")
+        }
+
+        let name = withUnsafePointer(to: &props.name) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: Int(TRT_DEVICE_NAME_MAX)) { cStr in
+                String(cString: cStr)
+            }
+        }
+
+        return DeviceProperties(
+            name: name,
+            computeCapabilityMajor: Int(props.computeCapabilityMajor),
+            computeCapabilityMinor: Int(props.computeCapabilityMinor),
+            totalMemory: props.totalMemory,
+            multiProcessorCount: Int(props.multiProcessorCount),
+            maxThreadsPerBlock: Int(props.maxThreadsPerBlock),
+            warpSize: Int(props.warpSize)
+        )
+    }
+
+    /// RAII wrapper around a CUDA stream.
+    public final class CUDAStream: @unchecked Sendable {
+        public let rawValue: UInt64
+
+        /// Creates a new CUDA stream on device 0.
+        public init() throws {
+            var stream: UInt64 = 0
+            let status = trt_cuda_stream_create(&stream)
+            guard status == 0, stream != 0 else {
+                throw TensorRTLLMError.runtimeUnavailable("Failed to create CUDA stream (status \(status)).")
+            }
+            self.rawValue = stream
+        }
+
+        deinit {
+            _ = trt_cuda_stream_destroy(rawValue)
+        }
+
+        /// Synchronizes the stream, blocking until all enqueued work completes.
+        public func synchronize() throws {
+            let status = trt_cuda_stream_synchronize(rawValue)
+            guard status == 0 else {
+                throw TensorRTLLMError.runtimeUnavailable("Failed to synchronize CUDA stream (status \(status)).")
+            }
+        }
+    }
+
     /// Builds a small serialized FP32 engine plan for a trivial identity network.
     public static func buildIdentityEnginePlan(elementCount: Int = 8) throws -> Data {
         var rawPtr: UnsafeMutablePointer<UInt8>?

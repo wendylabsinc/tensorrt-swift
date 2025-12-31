@@ -1519,8 +1519,52 @@ public actor ExecutionContext: ExecutionContexting {
     }
 
     /// Runs warm-up passes for timing stabilization. Returns a summary of measured latencies.
+    ///
+    /// Warmup runs inference with zero-filled inputs to stabilize GPU clocks and ensure
+    /// consistent latency measurements in subsequent runs.
+    ///
+    /// Example:
+    /// ```swift
+    /// let summary = try await context.warmup(iterations: 10)
+    /// print("Average latency: \(summary.average ?? .zero)")
+    /// ```
     public func warmup(iterations: Int = 1) async throws -> WarmupSummary {
-        throw TensorRTLLMError.notImplemented("Warm-up execution")
+        guard iterations > 0 else {
+            return WarmupSummary(samples: [])
+        }
+
+        // Create zero-filled input batch from engine description
+        var inputs: [String: TensorValue] = [:]
+        for input in engine.description.inputs {
+            let desc = input.descriptor
+            let byteCount = desc.shape.elementCount * desc.dataType.byteCount
+            let zeroData = Data(repeating: 0, count: max(byteCount, 1))
+            inputs[desc.name] = TensorValue(descriptor: desc, storage: .host(zeroData))
+        }
+        let batch = InferenceBatch(inputs: inputs)
+
+        var samples: [Duration] = []
+        samples.reserveCapacity(iterations)
+
+        for _ in 0..<iterations {
+            let start = ContinuousClock.now
+            _ = try await enqueue(batch, synchronously: true)
+            let elapsed = ContinuousClock.now - start
+            samples.append(elapsed)
+        }
+
+        // Compute statistics
+        let sortedSamples = samples.sorted()
+        let average: Duration? = samples.isEmpty ? nil : samples.reduce(.zero, +) / samples.count
+        let minimum = sortedSamples.first
+        let maximum = sortedSamples.last
+
+        return WarmupSummary(
+            samples: samples,
+            average: average,
+            minimum: minimum,
+            maximum: maximum
+        )
     }
 
     /// Releases device resources associated with the context.
