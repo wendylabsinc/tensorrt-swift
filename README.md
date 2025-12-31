@@ -4,54 +4,137 @@
 ![Swift 6.2+](https://img.shields.io/badge/Swift-6.2%2B-F05138?logo=swift&logoColor=white)
 ![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)
 ![TensorRT](https://img.shields.io/badge/TensorRT-10.x-76B900?logo=nvidia&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia&logoColor=white)
 
-Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT-LLM on Linux.
+Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT on Linux, designed for LLM and deep learning inference workloads.
 
-This repository is **work in progress** and **subject to breaking changes** (including major public
-API reshuffles) while the low-level foundations are still being established.
+> **Note**: This package currently wraps the **TensorRT** inference engine. Full TensorRT-LLM integration (in-flight batching, KV-cache management, tensor parallelism) is planned for future releases.
+
+This repository is **work in progress** and **subject to breaking changes** while the low-level foundations are being established.
 
 Swift 6.2 features are used aggressively where feasible:
-- `InlineArray` to keep common small metadata (like shapes/strides) allocation-free.
-- `Span` / `MutableSpan` / `Data.bytes` for safer, more composable views over contiguous memory at
-  the boundaries where we hand buffers to TensorRT-LLM/CUDA.
+- `InlineArray` to keep common small metadata (like shapes/strides) allocation-free
+- `Span` / `MutableSpan` / `Data.bytes` for safer, more composable views over contiguous memory
+- Actor-based `ExecutionContext` for thread-safe inference
 
-## Requirements
+## System Requirements
 
-- **Swift 6.2+** (the package is written in Swift 6 mode)
-- **Linux** with TensorRT-LLM installed *or* a container environment where the TensorRT-LLM shared libraries
-  are available at runtime (e.g. `libtensorrt_llm.so`, `libnvinfer.so`)
-- For the end-to-end GPU test: a working NVIDIA driver stack accessible from the host/container
-  (CUDA driver `libcuda.so` must be available)
+### Required Libraries
 
-Notes:
-- This package currently targets **system-installed** TensorRT-LLM headers/libs (via a tiny C++ shim
-  target that links `libnvinfer`, `libnvinfer_plugin`, `libnvonnxparser`, and `libtensorrt_llm` on Linux).
-- You may need to ensure your container has access to the host GPU and driver libraries (e.g.
-  NVIDIA Container Toolkit).
+The package links against the following system libraries at **build time** and **runtime**:
 
-## What Works Today (System-Integrated APIs)
+| Library | Package | Purpose |
+|---------|---------|---------|
+| `libnvinfer.so` | TensorRT | Core inference engine |
+| `libnvinfer_plugin.so` | TensorRT | Built-in plugins |
+| `libnvonnxparser.so` | TensorRT | ONNX model import |
+| `libcuda.so` | CUDA Driver | GPU access |
 
-The following public APIs have real integration with the TensorRT-LLM system libraries (not stubs):
+### Installation
 
-- `TensorRTLLMRuntimeProbe.inferRuntimeVersion()` (dynamic `dlopen` probe)
-- `TensorRTLLMSystem.linkedRuntimeVersion()` (linked `libnvinfer` version)
-- `TensorRTLLMSystem.buildIdentityEnginePlan(elementCount:)` (builds a tiny identity engine plan)
-- `TensorRTLLMSystem.runIdentityPlanF32(plan:input:)` (runs the identity engine on GPU)
-- `TensorRTLLMSystem.initializePlugins()` / `TensorRTLLMSystem.loadPluginLibrary(_:)` (plugin registration/loading)
-- `TensorRTLLMRuntime.deserializeEngine(from:configuration:)` (deserializes and reflects IO surface)
-- `TensorRTLLMRuntime.buildEngine(onnxURL:options:)` (builds a TensorRT plan via `nvonnxparser`)
-- `ExecutionContext.enqueue(_:)` (executes a plan using host buffers)
-- `ExecutionContext.enqueueDevice(inputs:outputs:synchronously:)` (device pointers + async support)
-- `ExecutionQueue.external(streamIdentifier:)` (enqueue on a caller-provided CUDA stream)
-- `ExecutionContext.recordEvent(_:)` + `TensorRTLLMSystem.CUDAEvent` (event-based completion)
-- Dynamic shapes + profiles:
-  - `ExecutionContext.reshape(bindings:)`
-  - `ExecutionContext.setOptimizationProfile(named:)`
-- Multi-GPU selection:
-  - `DeviceSelection(gpu:)` is respected by `ExecutionContext`
-- Convenience:
-  - `ExecutionContext.enqueueF32(inputName:input:outputName:output:...)` (single-input/single-output)
-  - `ExecutionContext.enqueueBytes(inputName:input:outputName:output:...)` (byte-level)
+#### Option 1: NVIDIA Container (Recommended)
+
+Use the official TensorRT container which includes all dependencies:
+
+```bash
+docker run --gpus all -it nvcr.io/nvidia/tensorrt:24.08-py3
+```
+
+#### Option 2: System Installation (Ubuntu/Debian)
+
+```bash
+# 1. Install CUDA 12.6
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+sudo apt-get install -y cuda-toolkit-12-6
+
+# 2. Install TensorRT 10.x
+sudo apt-get install -y libnvinfer10 libnvinfer-plugin10 libnvonnxparser10 libnvinfer-dev
+
+# 3. Add CUDA to your path
+export PATH=/usr/local/cuda-12.6/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-12.6/lib64:$LD_LIBRARY_PATH
+```
+
+#### Option 3: From NVIDIA Developer Downloads
+
+1. Download [CUDA Toolkit 12.6](https://developer.nvidia.com/cuda-downloads)
+2. Download [TensorRT 10.x](https://developer.nvidia.com/tensorrt) (requires NVIDIA Developer account)
+3. Follow NVIDIA's installation guides
+
+### Verifying Installation
+
+```bash
+# Check CUDA
+nvcc --version
+
+# Check TensorRT
+dpkg -l | grep nvinfer
+# or
+ls /usr/lib/x86_64-linux-gnu/libnvinfer*
+```
+
+### Swift Installation
+
+Install Swift 6.2+ via [Swiftly](https://swiftlang.github.io/swiftly/):
+
+```bash
+curl -L https://swiftlang.github.io/swiftly/swiftly-install.sh | bash
+swiftly install 6.2
+```
+
+## What Works Today
+
+### Core APIs
+
+| API | Description |
+|-----|-------------|
+| `TensorRTLLMRuntime.buildEngine(onnxURL:options:)` | Build TensorRT engine from ONNX |
+| `TensorRTLLMRuntime.deserializeEngine(from:)` | Load serialized engine plan |
+| `Engine.save(to:)` / `Engine.load(from:)` | Persist/load engines to disk |
+| `ExecutionContext.enqueue(_:)` | Execute inference (host buffers) |
+| `ExecutionContext.enqueueDevice(...)` | Execute with device pointers |
+| `ExecutionContext.stream(...)` | Streaming inference (AsyncSequence) |
+| `ExecutionContext.warmup(iterations:)` | Warmup for stable latency |
+
+### GPU & Device APIs
+
+| API | Description |
+|-----|-------------|
+| `TensorRTLLMSystem.cudaDeviceCount()` | Number of available GPUs |
+| `TensorRTLLMSystem.deviceProperties(device:)` | GPU name, compute capability, memory |
+| `TensorRTLLMSystem.memoryInfo(device:)` | Free/total GPU memory |
+| `TensorRTLLMSystem.CUDAStream` | RAII stream wrapper |
+| `TensorRTLLMSystem.CUDAEvent` | RAII event wrapper |
+
+### Dynamic Shapes & Profiles
+
+| API | Description |
+|-----|-------------|
+| `ExecutionContext.reshape(bindings:)` | Set input shapes at runtime |
+| `ExecutionContext.setOptimizationProfile(named:)` | Switch optimization profiles |
+| `OptimizationProfile` | Define min/opt/max shapes |
+
+### Swift-y Conveniences
+
+```swift
+// TensorShape with array literal
+let shape: TensorShape = [1, 3, 224, 224]
+print(shape)        // "TensorShape[1, 3, 224, 224]"
+print(shape[0])     // 1
+
+// Engine persistence
+try engine.save(to: URL(fileURLWithPath: "model.engine"))
+let loaded = try Engine.load(from: URL(fileURLWithPath: "model.engine"))
+
+// Streaming inference (AsyncSequence)
+for try await step in context.stream(initialBatch: batch, configuration: config) { ... }
+
+// Query GPU before loading
+let mem = try TensorRTLLMSystem.memoryInfo()
+print("Free GPU memory: \(mem.free / 1_000_000_000) GB")
+```
 
 ## Quick Start
 
@@ -77,16 +160,26 @@ let package = Package(
 )
 ```
 
-### Probe TensorRT-LLM availability (dlopen)
+### Query GPU and TensorRT version
 
 ```swift
 import TensorRTLLM
 
+// Check TensorRT version
 let version = try TensorRTLLMRuntimeProbe.inferRuntimeVersion()
-print("TensorRT-LLM runtime version: \(version)")
+print("TensorRT version: \(version)")
+
+// Check GPU
+let props = try TensorRTLLMSystem.deviceProperties()
+print("GPU: \(props.name)")
+print("Compute Capability: \(props.computeCapability)")
+print("Memory: \(props.totalMemory / 1_000_000_000) GB")
+
+let mem = try TensorRTLLMSystem.memoryInfo()
+print("Free: \(mem.free / 1_000_000_000) GB / \(mem.total / 1_000_000_000) GB")
 ```
 
-### Build an engine from ONNX (static shape) and run it
+### Build an engine from ONNX and run inference
 
 ```swift
 import TensorRTLLM
@@ -100,9 +193,17 @@ let engine = try runtime.buildEngine(
     )
 )
 
-let ctx = try engine.makeExecutionContext()
-let inputDesc = engine.description.inputs[0].descriptor
+// Save for later use (avoid rebuild)
+try engine.save(to: URL(fileURLWithPath: "model.engine"))
 
+let ctx = try engine.makeExecutionContext()
+
+// Warmup for stable latency
+let warmup = try await ctx.warmup(iterations: 10)
+print("Warmup avg: \(warmup.average ?? .zero)")
+
+// Run inference
+let inputDesc = engine.description.inputs[0].descriptor
 let input: [Float] = (0..<inputDesc.shape.elementCount).map(Float.init)
 let inputBytes = input.withUnsafeBufferPointer { Data(buffer: $0) }
 
@@ -112,108 +213,51 @@ let batch = InferenceBatch(inputs: [
 let result = try await ctx.enqueue(batch)
 ```
 
-### Build a dynamic ONNX engine with optimization profiles
-
-If your ONNX model has dynamic shapes, you must provide optimization profiles at build time and
-select a profile + `reshape(...)` at runtime.
+### Streaming inference (for LLMs)
 
 ```swift
 import TensorRTLLM
 
-let profile0 = OptimizationProfile(
-    name: "0",
-    axes: [:],
-    bindingRanges: [
-        "input": .init(min: TensorShape([1]), optimal: TensorShape([8]), max: TensorShape([16])),
-    ]
-)
+let stream = context.stream(
+    initialBatch: promptBatch,
+    configuration: StreamingConfiguration(maxSteps: 100)
+) { previousResult in
+    // Transform previous output into next input (e.g., append generated token)
+    return makeNextBatch(from: previousResult)
+}
 
-let profile1 = OptimizationProfile(
-    name: "1",
+for try await step in stream {
+    print("Step \(step.stepIndex), final: \(step.isFinal)")
+    // Process each step as it arrives
+    if step.isFinal { break }
+}
+```
+
+### Dynamic shapes with optimization profiles
+
+```swift
+import TensorRTLLM
+
+let profile = OptimizationProfile(
+    name: "batch_range",
     axes: [:],
     bindingRanges: [
-        "input": .init(min: TensorShape([32]), optimal: TensorShape([32]), max: TensorShape([64])),
+        "input": .init(
+            min: TensorShape([1, 512]),
+            optimal: TensorShape([8, 512]),
+            max: TensorShape([32, 512])
+        ),
     ]
 )
 
 let engine = try TensorRTLLMRuntime().buildEngine(
     onnxURL: URL(fileURLWithPath: "dynamic.onnx"),
-    options: EngineBuildOptions(precision: [.fp32], profiles: [profile0, profile1])
-)
-let ctx = try engine.makeExecutionContext()
-```
-
-### Dynamic shapes checklist (profiles + reshape)
-
-For dynamic-shape engines, the typical order is:
-
-```swift
-try await ctx.setOptimizationProfile(named: "0")
-try await ctx.reshape(bindings: ["input": TensorShape([8])])
-let result = try await ctx.enqueue(batch)
-```
-
-### Build, deserialize, and run a tiny identity engine (GPU)
-
-```swift
-import TensorRTLLM
-
-// 1) Build a minimal engine plan using the system TensorRT builder.
-let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: 8)
-
-// 2) Deserialize the plan and inspect inputs/outputs (names + shapes).
-let runtime = TensorRTLLMRuntime()
-let engine = try runtime.deserializeEngine(from: plan)
-print("Inputs:", engine.description.inputs.map(\.name))
-print("Outputs:", engine.description.outputs.map(\.name))
-
-// 3) Execute the plan via TensorRT enqueue + CUDA driver API.
-let input: [Float] = (0..<8).map(Float.init)
-let output = try TensorRTLLMSystem.runIdentityPlanF32(plan: plan, input: input)
-precondition(output == input)
-```
-
-### Execute using the high-level `Engine` + `ExecutionContext`
-
-```swift
-import TensorRTLLM
-
-let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: 8)
-let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
-let ctx = try engine.makeExecutionContext()
-
-let inputDesc = engine.description.inputs[0].descriptor
-let outputDesc = engine.description.outputs[0].descriptor
-
-let inputFloats: [Float] = (0..<8).map(Float.init)
-let inputBytes = inputFloats.withUnsafeBufferPointer { Data(buffer: $0) }
-
-let input = TensorValue(
-    descriptor: inputDesc,
-    storage: .host(inputBytes)
+    options: EngineBuildOptions(precision: [.fp32], profiles: [profile])
 )
 
-let batch = InferenceBatch(inputs: [inputDesc.name: input])
-let result = try await ctx.enqueue(batch)
-let outputValue = result.outputs[outputDesc.name]!
-```
-
-### Execute with caller-provided buffers (`[Float]` / `[UInt8]`)
-
-```swift
-import TensorRTLLM
-
-let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: 8)
-let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
 let ctx = try engine.makeExecutionContext()
-
-let inputName = engine.description.inputs[0].name
-let outputName = engine.description.outputs[0].name
-
-let input: [Float] = (0..<8).map(Float.init)
-var output: [Float] = []
-try await ctx.enqueueF32(inputName: inputName, input: input, outputName: outputName, output: &output)
-precondition(output == input)
+try await ctx.reshape(bindings: ["input": TensorShape([16, 512])])
+let result = try await ctx.enqueue(batch)
 ```
 
 ## Examples
@@ -281,3 +325,35 @@ swift test
 
 The test suite includes end-to-end GPU tests that build engines (TensorRT builder and `nvonnxparser`),
 deserialize them, and run inference (host buffers, device pointers, external streams, and CUDA events).
+
+## Troubleshooting
+
+### `libnvinfer.so: cannot open shared object file`
+
+TensorRT libraries are not in your library path. Add them:
+
+```bash
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+# or wherever TensorRT is installed
+```
+
+### `CUDA driver version is insufficient`
+
+Your NVIDIA driver is too old for CUDA 12.6. Update your driver:
+
+```bash
+sudo apt-get install nvidia-driver-550  # or newer
+```
+
+### Swift can't find CUDA headers
+
+Ensure CUDA is installed and the include path is correct:
+
+```bash
+ls /usr/local/cuda/include/cuda.h
+# If not found, create symlink or adjust Package.swift
+```
+
+## License
+
+See [LICENSE.txt](LICENSE.txt).
