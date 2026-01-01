@@ -12,13 +12,10 @@ jobs:
     runs-on: [self-hosted, rtx4090]
     
     steps:
-      - name: Clean workspace
-        run: |
-          sudo rm -rf ${{ github.workspace }}/* ${{ github.workspace }}/.* 2>/dev/null || true
-          sudo rm -rf ${{ github.workspace }} || true
-
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          clean: false
 
       - name: Build CI Image
         run: |
@@ -27,6 +24,8 @@ jobs:
       - name: Build Package
         run: |
           docker run --rm --gpus all \
+            --user $(id -u):$(id -g) \
+            -e HOME=/tmp \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             tensorrt-swift-ci:${{ github.sha }} \
@@ -35,15 +34,12 @@ jobs:
       - name: Run Tests
         run: |
           docker run --rm --gpus all \
+            --user $(id -u):$(id -g) \
+            -e HOME=/tmp \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             tensorrt-swift-ci:${{ github.sha }} \
             ./scripts/swiftw test
-
-      - name: Fix permissions
-        if: always()
-        run: |
-          sudo chown -R $(id -u):$(id -g) ${{ github.workspace }} || true
 
       - name: Cleanup
         if: always()

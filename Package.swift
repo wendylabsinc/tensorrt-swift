@@ -24,8 +24,9 @@ let package = Package(
         .executable(name: "AsyncInference", targets: ["AsyncInference"]),
         .executable(name: "ImageClassifier", targets: ["ImageClassifier"]),
         .executable(name: "DeviceMemoryPipeline", targets: ["DeviceMemoryPipeline"]),
-        // Advanced Examples
+        // LLM Examples
         .executable(name: "StreamingLLM", targets: ["StreamingLLM"]),
+        // Advanced Examples
         .executable(name: "MultiGPU", targets: ["MultiGPU"]),
         .executable(name: "CUDAEventPipelining", targets: ["CUDAEventPipelining"]),
         .executable(name: "BenchmarkSuite", targets: ["BenchmarkSuite"]),
@@ -113,12 +114,14 @@ let package = Package(
             path: "Examples/DeviceMemoryPipeline"
         ),
 
-        // MARK: - Advanced Examples
+        // MARK: - LLM Examples
         .executableTarget(
             name: "StreamingLLM",
-            dependencies: ["TensorRT"],
-            path: "Examples/StreamingLLM"
+            dependencies: ["TensorRTLLM"],
+            path: "ExamplesLLM/StreamingLLM"
         ),
+
+        // MARK: - Advanced Examples
         .executableTarget(
             name: "MultiGPU",
             dependencies: ["TensorRT"],

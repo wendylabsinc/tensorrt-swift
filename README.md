@@ -294,11 +294,18 @@ The wrapper keeps build artifacts in `/tmp` by default; override with `SWIFT_BUI
 | **ImageClassifier** | End-to-end pipeline: preprocess → inference → postprocess | `./scripts/swiftw run ImageClassifier` |
 | **DeviceMemoryPipeline** | Keep tensors on GPU, avoid H2D/D2H transfers | `./scripts/swiftw run DeviceMemoryPipeline` |
 
-### Advanced Examples
+### LLM Examples (TensorRTLLM)
+
+LLM examples live under `ExamplesLLM/`.
 
 | Example | Description | Command |
 |---------|-------------|---------|
 | **StreamingLLM** | Token-by-token generation with KV-cache pattern | `./scripts/swiftw run StreamingLLM` |
+
+### Advanced Examples
+
+| Example | Description | Command |
+|---------|-------------|---------|
 | **MultiGPU** | Distribute inference across multiple GPUs | `./scripts/swiftw run MultiGPU` |
 | **CUDAEventPipelining** | Overlap compute with data transfer using events | `./scripts/swiftw run CUDAEventPipelining` |
 | **BenchmarkSuite** | Comprehensive throughput/latency measurement | `./scripts/swiftw run BenchmarkSuite` |
