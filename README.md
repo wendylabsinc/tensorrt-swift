@@ -89,6 +89,16 @@ curl -L https://swiftlang.github.io/swiftly/swiftly-install.sh | bash
 swiftly install 6.2
 ```
 
+### Development Workflow (macOS/Windows)
+
+You can write code on macOS or Windows, but **building and running must happen on Linux** with
+TensorRT/CUDA libraries available. The recommended workflow is:
+
+- Develop locally on macOS/Windows.
+- Build/test inside a Linux container (Option 1 / 1b) or on a Linux host.
+
+Cross-compiling from macOS/Windows to Linux is possible but fragile and not recommended.
+
 ## What Works Today
 
 ### Core APIs
