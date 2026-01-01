@@ -8,9 +8,8 @@
 //
 // Note: Uses simulated model since real weights are large
 //
-// Run with: swift run VisionTransformer
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run VisionTransformer
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -40,8 +39,8 @@ struct VisionTransformer {
 
         // Step 1: Build ViT model components
         print("1. Building ViT model...")
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: hiddenSize)
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: hiddenSize)
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
         let context = try engine.makeExecutionContext()
 
         print("   Architecture:")

@@ -6,13 +6,12 @@
 // 3. Using CUDA events to track completion
 // 4. Overlapping CPU work with GPU execution
 //
-// Run with: swift run AsyncInference
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run AsyncInference
+import TensorRT
 import FoundationEssentials
 
-#if canImport(TensorRTLLMNative)
-import TensorRTLLMNative
+#if canImport(TensorRTNative)
+import TensorRTNative
 #endif
 
 @main
@@ -20,7 +19,7 @@ struct AsyncInference {
     static func main() async throws {
         print("=== Async Inference Example ===\n")
 
-#if canImport(TensorRTLLMNative)
+#if canImport(TensorRTNative)
         // Configuration
         let elementCount = 1024
         let numIterations = 50
@@ -31,15 +30,15 @@ struct AsyncInference {
 
         // Step 1: Build engine
         print("\n1. Building TensorRT engine...")
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: elementCount)
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: elementCount)
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
         print("   Engine ready")
 
         // Step 2: Create CUDA stream
         print("\n2. Creating CUDA stream...")
         var stream: UInt64 = 0
         guard trt_cuda_stream_create(&stream) == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to create CUDA stream")
+            throw TensorRTError.runtimeUnavailable("Failed to create CUDA stream")
         }
         defer { _ = trt_cuda_stream_destroy(stream) }
         print("   Stream created: 0x\(String(stream, radix: 16))")
@@ -55,12 +54,12 @@ struct AsyncInference {
         var dInput: UInt64 = 0
         var dOutput: UInt64 = 0
         guard trt_cuda_malloc(byteCount, &dInput) == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to allocate input buffer")
+            throw TensorRTError.runtimeUnavailable("Failed to allocate input buffer")
         }
         defer { _ = trt_cuda_free(dInput) }
 
         guard trt_cuda_malloc(byteCount, &dOutput) == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to allocate output buffer")
+            throw TensorRTError.runtimeUnavailable("Failed to allocate output buffer")
         }
         defer { _ = trt_cuda_free(dOutput) }
 
@@ -99,7 +98,7 @@ struct AsyncInference {
         let asyncStart = ContinuousClock.now
 
         // Create event for completion tracking
-        let event = try TensorRTLLMSystem.CUDAEvent()
+        let event = try TensorRTSystem.CUDAEvent()
 
         var cpuWorkDone = 0
 
@@ -172,7 +171,7 @@ struct AsyncInference {
         print("\n=== Async Inference Complete ===")
 
 #else
-        print("This example requires TensorRTLLMNative (Linux with TensorRT)")
+        print("This example requires TensorRTNative (Linux with TensorRT)")
 #endif
     }
 

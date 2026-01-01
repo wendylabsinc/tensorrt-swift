@@ -1,14 +1,14 @@
-# TensorRT-LLM Swift (Linux)
+# TensorRT Swift (Linux)
 
-[![CI](https://github.com/wendylabsinc/tensorrt-llm-swift/actions/workflows/ci.yml/badge.svg)](https://github.com/wendylabsinc/tensorrt-llm-swift/actions/workflows/ci.yml)
+[![CI](https://github.com/wendylabsinc/tensorrt-swift/actions/workflows/ci.yml/badge.svg)](https://github.com/wendylabsinc/tensorrt-swift/actions/workflows/ci.yml)
 ![Swift 6.2+](https://img.shields.io/badge/Swift-6.2%2B-F05138?logo=swift&logoColor=white)
 ![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)
 ![TensorRT](https://img.shields.io/badge/TensorRT-10.x-76B900?logo=nvidia&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia&logoColor=white)
 
-Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT on Linux, designed for LLM and deep learning inference workloads.
+Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT on Linux, with a separate TensorRTLLM product for LLM-specific extensions.
 
-> **Note**: This package currently wraps the **TensorRT** inference engine. Full TensorRT-LLM integration (in-flight batching, KV-cache management, tensor parallelism) is planned for future releases.
+> **Note**: The `TensorRT` product wraps the **TensorRT** inference engine. The `TensorRTLLM` product is a thin extension layer today; full TensorRT-LLM integration (in-flight batching, KV-cache management, tensor parallelism) is planned for future releases.
 
 This repository is **work in progress** and **subject to breaking changes** while the low-level foundations are being established.
 
@@ -39,6 +39,11 @@ Use the official TensorRT container which includes all dependencies:
 ```bash
 docker run --gpus all -it nvcr.io/nvidia/tensorrt:24.08-py3
 ```
+
+#### Option 1b: Jetson Container (Orin Nano, AGX Thor)
+
+Jetson uses aarch64 containers and must match the host JetPack/L4T release. See
+`docs/jetson-container.md` for a full recipe.
 
 #### Option 2: System Installation (Ubuntu/Debian)
 
@@ -90,8 +95,8 @@ swiftly install 6.2
 
 | API | Description |
 |-----|-------------|
-| `TensorRTLLMRuntime.buildEngine(onnxURL:options:)` | Build TensorRT engine from ONNX |
-| `TensorRTLLMRuntime.deserializeEngine(from:)` | Load serialized engine plan |
+| `TensorRTRuntime.buildEngine(onnxURL:options:)` | Build TensorRT engine from ONNX |
+| `TensorRTRuntime.deserializeEngine(from:)` | Load serialized engine plan |
 | `Engine.save(to:)` / `Engine.load(from:)` | Persist/load engines to disk |
 | `ExecutionContext.enqueue(_:)` | Execute inference (host buffers) |
 | `ExecutionContext.enqueueDevice(...)` | Execute with device pointers |
@@ -102,11 +107,11 @@ swiftly install 6.2
 
 | API | Description |
 |-----|-------------|
-| `TensorRTLLMSystem.cudaDeviceCount()` | Number of available GPUs |
-| `TensorRTLLMSystem.deviceProperties(device:)` | GPU name, compute capability, memory |
-| `TensorRTLLMSystem.memoryInfo(device:)` | Free/total GPU memory |
-| `TensorRTLLMSystem.CUDAStream` | RAII stream wrapper |
-| `TensorRTLLMSystem.CUDAEvent` | RAII event wrapper |
+| `TensorRTSystem.cudaDeviceCount()` | Number of available GPUs |
+| `TensorRTSystem.deviceProperties(device:)` | GPU name, compute capability, memory |
+| `TensorRTSystem.memoryInfo(device:)` | Free/total GPU memory |
+| `TensorRTSystem.CUDAStream` | RAII stream wrapper |
+| `TensorRTSystem.CUDAEvent` | RAII event wrapper |
 
 ### Dynamic Shapes & Profiles
 
@@ -132,7 +137,7 @@ let loaded = try Engine.load(from: URL(fileURLWithPath: "model.engine"))
 for try await step in context.stream(initialBatch: batch, configuration: config) { ... }
 
 // Query GPU before loading
-let mem = try TensorRTLLMSystem.memoryInfo()
+let mem = try TensorRTSystem.memoryInfo()
 print("Free GPU memory: \(mem.free / 1_000_000_000) GB")
 ```
 
@@ -147,44 +152,48 @@ import PackageDescription
 let package = Package(
     name: "MyApp",
     dependencies: [
-        .package(url: "https://github.com/wendylabsinc/tensorrt-llm-swift", from: "0.0.1"),
+        .package(url: "https://github.com/wendylabsinc/tensorrt-swift", from: "0.0.1"),
     ],
     targets: [
         .executableTarget(
             name: "MyApp",
             dependencies: [
-                .product(name: "TensorRTLLM", package: "tensorrt-llm-swift"),
+                .product(name: "TensorRT", package: "tensorrt-swift"),
             ]
         ),
     ]
 )
 ```
 
+To use the LLM extension module instead:
+
+```swift
+.product(name: "TensorRTLLM", package: "tensorrt-swift")
+```
+
 ### Query GPU and TensorRT version
 
 ```swift
-import TensorRTLLM
-
+import TensorRT
 // Check TensorRT version
-let version = try TensorRTLLMRuntimeProbe.inferRuntimeVersion()
+let version = try TensorRTRuntimeProbe.inferRuntimeVersion()
 print("TensorRT version: \(version)")
 
 // Check GPU
-let props = try TensorRTLLMSystem.deviceProperties()
+let props = try TensorRTSystem.deviceProperties()
 print("GPU: \(props.name)")
 print("Compute Capability: \(props.computeCapability)")
 print("Memory: \(props.totalMemory / 1_000_000_000) GB")
 
-let mem = try TensorRTLLMSystem.memoryInfo()
+let mem = try TensorRTSystem.memoryInfo()
 print("Free: \(mem.free / 1_000_000_000) GB / \(mem.total / 1_000_000_000) GB")
 ```
 
 ### Build an engine from ONNX and run inference
 
 ```swift
-import TensorRTLLM
-
-let runtime = TensorRTLLMRuntime()
+import TensorRT
+let runtime = TensorRTRuntime()
 let engine = try runtime.buildEngine(
     onnxURL: URL(fileURLWithPath: "model.onnx"),
     options: EngineBuildOptions(
@@ -216,8 +225,7 @@ let result = try await ctx.enqueue(batch)
 ### Streaming inference (for LLMs)
 
 ```swift
-import TensorRTLLM
-
+import TensorRT
 let stream = context.stream(
     initialBatch: promptBatch,
     configuration: StreamingConfiguration(maxSteps: 100)
@@ -236,8 +244,7 @@ for try await step in stream {
 ### Dynamic shapes with optimization profiles
 
 ```swift
-import TensorRTLLM
-
+import TensorRT
 let profile = OptimizationProfile(
     name: "batch_range",
     axes: [:],
@@ -250,7 +257,7 @@ let profile = OptimizationProfile(
     ]
 )
 
-let engine = try TensorRTLLMRuntime().buildEngine(
+let engine = try TensorRTRuntime().buildEngine(
     onnxURL: URL(fileURLWithPath: "dynamic.onnx"),
     options: EngineBuildOptions(precision: [.fp32], profiles: [profile])
 )
@@ -262,44 +269,45 @@ let result = try await ctx.enqueue(batch)
 
 ## Examples
 
-The package includes 17 examples organized by difficulty level. Run any example with `swift run <ExampleName>`.
+The package includes 17 examples organized by difficulty level. Run any example with `./scripts/swiftw run <ExampleName>`.
+The wrapper keeps build artifacts in `/tmp` by default; override with `SWIFT_BUILD_PATH` if needed.
 
 ### Beginner Examples
 
 | Example | Description | Command |
 |---------|-------------|---------|
-| **HelloTensorRT** | Minimal "hello world" - probe version, build identity engine, run inference | `swift run HelloTensorRT` |
-| **ONNXInference** | Load ONNX model, build engine, run inference with throughput measurement | `swift run ONNXInference` |
-| **BatchProcessing** | Process multiple batches, latency statistics (p50/p95/p99) | `swift run BatchProcessing` |
+| **HelloTensorRT** | Minimal "hello world" - probe version, build identity engine, run inference | `./scripts/swiftw run HelloTensorRT` |
+| **ONNXInference** | Load ONNX model, build engine, run inference with throughput measurement | `./scripts/swiftw run ONNXInference` |
+| **BatchProcessing** | Process multiple batches, latency statistics (p50/p95/p99) | `./scripts/swiftw run BatchProcessing` |
 
 ### Intermediate Examples
 
 | Example | Description | Command |
 |---------|-------------|---------|
-| **DynamicBatching** | Dynamic shapes for variable batch sizes at runtime | `swift run DynamicBatching` |
-| **MultiProfile** | Multiple optimization profiles for different workloads | `swift run MultiProfile` |
-| **AsyncInference** | Non-blocking inference with CUDA streams and events | `swift run AsyncInference` |
-| **ImageClassifier** | End-to-end pipeline: preprocess → inference → postprocess | `swift run ImageClassifier` |
-| **DeviceMemoryPipeline** | Keep tensors on GPU, avoid H2D/D2H transfers | `swift run DeviceMemoryPipeline` |
+| **DynamicBatching** | Dynamic shapes for variable batch sizes at runtime | `./scripts/swiftw run DynamicBatching` |
+| **MultiProfile** | Multiple optimization profiles for different workloads | `./scripts/swiftw run MultiProfile` |
+| **AsyncInference** | Non-blocking inference with CUDA streams and events | `./scripts/swiftw run AsyncInference` |
+| **ImageClassifier** | End-to-end pipeline: preprocess → inference → postprocess | `./scripts/swiftw run ImageClassifier` |
+| **DeviceMemoryPipeline** | Keep tensors on GPU, avoid H2D/D2H transfers | `./scripts/swiftw run DeviceMemoryPipeline` |
 
 ### Advanced Examples
 
 | Example | Description | Command |
 |---------|-------------|---------|
-| **StreamingLLM** | Token-by-token generation with KV-cache pattern | `swift run StreamingLLM` |
-| **MultiGPU** | Distribute inference across multiple GPUs | `swift run MultiGPU` |
-| **CUDAEventPipelining** | Overlap compute with data transfer using events | `swift run CUDAEventPipelining` |
-| **BenchmarkSuite** | Comprehensive throughput/latency measurement | `swift run BenchmarkSuite` |
-| **FP16Quantization** | Compare FP32 vs FP16 precision and performance | `swift run FP16Quantization` |
+| **StreamingLLM** | Token-by-token generation with KV-cache pattern | `./scripts/swiftw run StreamingLLM` |
+| **MultiGPU** | Distribute inference across multiple GPUs | `./scripts/swiftw run MultiGPU` |
+| **CUDAEventPipelining** | Overlap compute with data transfer using events | `./scripts/swiftw run CUDAEventPipelining` |
+| **BenchmarkSuite** | Comprehensive throughput/latency measurement | `./scripts/swiftw run BenchmarkSuite` |
+| **FP16Quantization** | Compare FP32 vs FP16 precision and performance | `./scripts/swiftw run FP16Quantization` |
 
 ### Real-World Examples
 
 | Example | Description | Command |
 |---------|-------------|---------|
-| **TextEmbedding** | Sentence transformer for semantic search | `swift run TextEmbedding` |
-| **ObjectDetection** | YOLO-style detection with NMS postprocessing | `swift run ObjectDetection` |
-| **WhisperTranscription** | Audio transcription pipeline (encoder pattern) | `swift run WhisperTranscription` |
-| **VisionTransformer** | ViT image classification with patch embeddings | `swift run VisionTransformer` |
+| **TextEmbedding** | Sentence transformer for semantic search | `./scripts/swiftw run TextEmbedding` |
+| **ObjectDetection** | YOLO-style detection with NMS postprocessing | `./scripts/swiftw run ObjectDetection` |
+| **WhisperTranscription** | Audio transcription pipeline (encoder pattern) | `./scripts/swiftw run WhisperTranscription` |
+| **VisionTransformer** | ViT image classification with patch embeddings | `./scripts/swiftw run VisionTransformer` |
 
 ### Example Output: BenchmarkSuite
 
@@ -320,8 +328,11 @@ The package includes 17 examples organized by difficulty level. Run any example 
 Run:
 
 ```bash
-swift test
+./scripts/swiftw test
 ```
+
+This wrapper keeps build artifacts in `/tmp` by default to avoid `.build` permission issues. Override with
+`SWIFT_BUILD_PATH=/your/path ./scripts/swiftw test` if needed.
 
 The test suite includes end-to-end GPU tests that build engines (TensorRT builder and `nvonnxparser`),
 deserialize them, and run inference (host buffers, device pointers, external streams, and CUDA events).

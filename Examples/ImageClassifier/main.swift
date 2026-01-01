@@ -8,9 +8,8 @@
 //
 // Note: Uses a simulated model since we don't bundle real weights
 //
-// Run with: swift run ImageClassifier
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run ImageClassifier
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -40,8 +39,8 @@ struct ImageClassifier {
         // Step 1: Create a simulated classification model
         print("1. Building classification model...")
         let inputSize = imageSize * imageSize * channels
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: inputSize)
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: inputSize)
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
         print("   Model input: \(channels)x\(imageSize)x\(imageSize) = \(inputSize) floats")
 
         // Step 2: Create execution context
@@ -88,7 +87,7 @@ struct ImageClassifier {
 
         guard let outputValue = result.outputs["output"],
               case .host(let outputData) = outputValue.storage else {
-            throw TensorRTLLMError.invalidBinding("Missing output")
+            throw TensorRTError.invalidBinding("Missing output")
         }
 
         var logits = [Float](repeating: 0, count: inputSize)

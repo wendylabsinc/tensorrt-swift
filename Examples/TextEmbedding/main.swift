@@ -8,9 +8,8 @@
 //
 // Note: Uses simulated model since real weights are large
 //
-// Run with: swift run TextEmbedding
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run TextEmbedding
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -43,8 +42,8 @@ struct TextEmbedding {
 
         // Step 1: Build embedding model
         print("1. Building embedding model...")
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: embeddingDim)
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: embeddingDim)
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
         let context = try engine.makeExecutionContext()
         print("   Model: hidden_size=\(hiddenSize), embedding_dim=\(embeddingDim)")
 

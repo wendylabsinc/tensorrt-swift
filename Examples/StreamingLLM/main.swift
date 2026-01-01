@@ -8,13 +8,12 @@
 //
 // Note: Uses simulated model since real LLM weights are large
 //
-// Run with: swift run StreamingLLM
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run StreamingLLM
+import TensorRT
 import FoundationEssentials
 
-#if canImport(TensorRTLLMNative)
-import TensorRTLLMNative
+#if canImport(TensorRTNative)
+import TensorRTNative
 #endif
 
 @main
@@ -39,11 +38,11 @@ struct StreamingLLM {
         print("This example demonstrates token-by-token generation with KV-cache pattern.")
         print("Using a simulated model for demonstration purposes.\n")
 
-#if canImport(TensorRTLLMNative)
+#if canImport(TensorRTNative)
         // Step 1: Build a simple model (simulating LLM decoder layer)
         print("1. Building simulated LLM model...")
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: hiddenSize)
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: hiddenSize)
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
         let context = try engine.makeExecutionContext()
         print("   Model: \(numLayers) layers, hidden_size=\(hiddenSize)")
 
@@ -181,7 +180,7 @@ struct StreamingLLM {
         print("\n=== Streaming LLM Complete ===")
 
 #else
-        print("This example requires TensorRTLLMNative (Linux with TensorRT)")
+        print("This example requires TensorRTNative (Linux with TensorRT)")
 #endif
     }
 

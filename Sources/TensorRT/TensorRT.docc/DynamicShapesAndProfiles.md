@@ -1,6 +1,6 @@
 # Dynamic Shapes and Optimization Profiles
 
-TensorRT-LLM requires optimization profiles for engines with dynamic shapes.
+TensorRT requires optimization profiles for engines with dynamic shapes.
 
 This package models profiles using ``OptimizationProfile`` and attaches them at build time via
 ``EngineBuildOptions``.
@@ -8,8 +8,7 @@ This package models profiles using ``OptimizationProfile`` and attaches them at 
 ## Build with profiles (ONNX)
 
 ```swift
-import TensorRTLLM
-
+import TensorRT
 let p0 = OptimizationProfile(
     name: "0",
     axes: [:],
@@ -26,9 +25,24 @@ let p1 = OptimizationProfile(
     ]
 )
 
-let engine = try TensorRTLLMRuntime().buildEngine(
+let engine = try TensorRTRuntime().buildEngine(
     onnxURL: URL(fileURLWithPath: "dynamic.onnx"),
     options: EngineBuildOptions(precision: [.fp32], profiles: [p0, p1])
+)
+```
+
+## Shape hints (single profile convenience)
+
+If you only need one fixed shape for a dynamic model, you can provide shape hints and let the
+runtime synthesize a single profile (min/opt/max are all set to the hinted shape):
+
+```swift
+let engine = try TensorRTRuntime().buildEngine(
+    onnxURL: URL(fileURLWithPath: "dynamic.onnx"),
+    options: EngineBuildOptions(
+        precision: [.fp16],
+        shapeHints: ["input": TensorShape([1, 8])]
+    )
 )
 ```
 

@@ -6,13 +6,12 @@
 // 3. Warm-up handling and statistical rigor
 // 4. Memory bandwidth estimation
 //
-// Run with: swift run BenchmarkSuite
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run BenchmarkSuite
+import TensorRT
 import FoundationEssentials
 
-#if canImport(TensorRTLLMNative)
-import TensorRTLLMNative
+#if canImport(TensorRTNative)
+import TensorRTNative
 #endif
 
 @main
@@ -20,7 +19,7 @@ struct BenchmarkSuite {
     static func main() async throws {
         print("=== TensorRT Benchmark Suite ===\n")
 
-#if canImport(TensorRTLLMNative)
+#if canImport(TensorRTNative)
         // Benchmark configurations
         let elementCounts = [64, 256, 1024, 4096, 16384]
         let warmupIterations = 50
@@ -32,7 +31,7 @@ struct BenchmarkSuite {
         print("  Benchmark iterations: \(benchmarkIterations)")
 
         // Check GPU
-        let deviceCount = try TensorRTLLMSystem.cudaDeviceCount()
+        let deviceCount = try TensorRTSystem.cudaDeviceCount()
         print("  CUDA devices: \(deviceCount)")
 
         var allResults: [BenchmarkResult] = []
@@ -139,7 +138,7 @@ struct BenchmarkSuite {
         print("\n=== Benchmark Suite Complete ===")
 
 #else
-        print("This example requires TensorRTLLMNative (Linux with TensorRT)")
+        print("This example requires TensorRTNative (Linux with TensorRT)")
 #endif
     }
 
@@ -177,8 +176,8 @@ struct BenchmarkSuite {
         benchmarkIterations: Int
     ) async throws -> BenchmarkResult {
         // Build engine
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: elementCount)
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: elementCount)
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
         let context = try engine.makeExecutionContext()
 
         // Prepare input

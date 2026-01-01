@@ -5,11 +5,10 @@
 // 2. Inspecting the engine's input/output bindings
 // 3. Running inference with the high-level API
 //
-// Run with: swift run ONNXInference [path/to/model.onnx]
+// Run with: ./scripts/swiftw run ONNXInference [path/to/model.onnx]
 //
 // If no ONNX file is provided, a minimal identity model is created for demonstration.
-
-import TensorRTLLM
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -30,7 +29,7 @@ struct ONNXInference {
             onnxURL = try createDemoONNXModel()
             isDemo = true
             print("No ONNX file provided. Using embedded demo model.")
-            print("Usage: swift run ONNXInference <path/to/model.onnx>\n")
+            print("Usage: ./scripts/swiftw run ONNXInference <path/to/model.onnx>\n")
         }
 
         defer {
@@ -43,7 +42,7 @@ struct ONNXInference {
         print("1. Building TensorRT engine from ONNX...")
         let buildStart = ContinuousClock.now
 
-        let runtime = TensorRTLLMRuntime()
+        let runtime = TensorRTRuntime()
         let engine = try runtime.buildEngine(
             onnxURL: onnxURL,
             options: EngineBuildOptions(
@@ -174,7 +173,7 @@ struct ONNXInference {
         let onnxBase64 = "CAc6XQoZCgVpbnB1dBIGb3V0cHV0IghJZGVudGl0eRINSWRlbnRpdHlHcmFwaFoXCgVpbnB1dBIOCgwIARIICgIIAQoCCAhiGAoGb3V0cHV0Eg4KDAgBEggKAggBCgIICEIECgAQDQ=="
 
         guard let onnxData = Data(base64Encoded: onnxBase64) else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to decode embedded ONNX model")
+            throw TensorRTError.runtimeUnavailable("Failed to decode embedded ONNX model")
         }
 
         let tmpDir = FileManager.default.temporaryDirectory

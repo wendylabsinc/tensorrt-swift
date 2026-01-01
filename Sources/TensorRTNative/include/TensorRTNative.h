@@ -92,7 +92,7 @@ int trt_build_engine_from_onnx_file(
   size_t* outSize
 );
 
-// Frees buffers returned by TensorRTLLMNative shim (malloc/free).
+// Frees buffers returned by TensorRTNative shim (malloc/free).
 void trt_free(void* ptr);
 
 // Deserialize a TensorRT engine plan into an engine handle (nvinfer1::ICudaEngine*).

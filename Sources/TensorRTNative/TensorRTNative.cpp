@@ -1,4 +1,4 @@
-#include "TensorRTLLMNative.h"
+#include "TensorRTNative.h"
 
 #include <cuda.h>
 #include <NvInfer.h>
@@ -47,6 +47,34 @@ void trtDestroy(T* ptr) noexcept {
   delete ptr;
 #else
   ptr->destroy();
+#endif
+}
+
+uint32_t trtNetworkFlags() {
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
+  // Explicit batch is the default in TensorRT 10+.
+  return 0;
+#else
+  return 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+#endif
+}
+
+void trtEnableFp16(nvinfer1::IBuilderConfig* config) {
+  if (!config) {
+    return;
+  }
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  config->setFlag(nvinfer1::BuilderFlag::kFP16);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
 #endif
 }
 
@@ -381,8 +409,7 @@ int trt_build_identity_engine_f32(int32_t elementCount, uint8_t** outData, size_
     return 2;
   }
 
-  // Explicit batch is required for modern TensorRT.
-  uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+  uint32_t flags = trtNetworkFlags();
   nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
   if (!network) {
     trtDestroy(builder);
@@ -460,7 +487,7 @@ int trt_build_dynamic_identity_engine_f32(int32_t min, int32_t opt, int32_t max,
     return 2;
   }
 
-  uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+  uint32_t flags = trtNetworkFlags();
   nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
   if (!network) {
     trtDestroy(builder);
@@ -588,7 +615,7 @@ int trt_build_dual_profile_identity_engine_f32(
     return 4;
   }
 
-  uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+  uint32_t flags = trtNetworkFlags();
   nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
   if (!network) {
     trtDestroy(builder);
@@ -738,7 +765,7 @@ int trt_build_engine_from_onnx_file_with_profiles(
     return 10;
   }
 
-  uint32_t flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+  uint32_t flags = trtNetworkFlags();
   nvinfer1::INetworkDefinition* network = builder->createNetworkV2(flags);
   if (!network) {
     trtDestroy(builder);
@@ -773,7 +800,7 @@ int trt_build_engine_from_onnx_file_with_profiles(
   config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, workspace);
 
   if (enableFp16 != 0) {
-    config->setFlag(nvinfer1::BuilderFlag::kFP16);
+    trtEnableFp16(config);
   }
 
   if (profileCount > 0) {

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <swift subcommand> [args...]" >&2
+  exit 2
+fi
+
+build_dir="${SWIFT_BUILD_PATH:-${TMPDIR:-/tmp}/tensorrt-swift-build}"
+subcommand="$1"
+shift
+
+has_build_path=0
+for arg in "$@"; do
+  if [[ "$arg" == "--build-path" || "$arg" == --build-path=* ]]; then
+    has_build_path=1
+    break
+  fi
+done
+
+case "$subcommand" in
+  build|test|run)
+    if [[ $has_build_path -eq 0 ]]; then
+      exec swift "$subcommand" --build-path "$build_dir" "$@"
+    else
+      exec swift "$subcommand" "$@"
+    fi
+    ;;
+  *)
+    exec swift "$subcommand" "$@"
+    ;;
+esac

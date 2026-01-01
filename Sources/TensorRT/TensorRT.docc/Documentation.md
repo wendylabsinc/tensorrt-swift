@@ -1,6 +1,6 @@
-# ``TensorRTLLM``
+# ``TensorRT``
 
-Swift-first APIs for NVIDIA TensorRT-LLM on Linux (Swift 6.2+).
+Swift-first APIs for NVIDIA TensorRT on Linux (Swift 6.2+).
 
 This package is a **work in progress** and may introduce breaking changes frequently while the
 core runtime/building surface stabilizes.
@@ -9,7 +9,7 @@ core runtime/building surface stabilizes.
 
 ### Runtime
 
-- ``TensorRTLLMRuntime``
+- ``TensorRTRuntime``
 - ``Engine``
 - ``ExecutionContext``
 
@@ -17,12 +17,12 @@ core runtime/building surface stabilizes.
 
 - ``EngineBuildOptions``
 - ``OptimizationProfile``
-- ``TensorRTLLMRuntime/buildEngine(onnxURL:options:)``
+- ``TensorRTRuntime/buildEngine(onnxURL:options:)``
 
 ### Loading Engines
 
 - ``EngineLoadConfiguration``
-- ``TensorRTLLMRuntime/deserializeEngine(from:configuration:)``
+- ``TensorRTRuntime/deserializeEngine(from:configuration:)``
 
 ### Dynamic Shapes & Profiles
 
@@ -31,8 +31,8 @@ core runtime/building surface stabilizes.
 
 ### System Integration
 
-- ``TensorRTLLMSystem``
-- ``TensorRTLLMRuntimeProbe``
+- ``TensorRTSystem``
+- ``TensorRTRuntimeProbe``
 
 ## Articles
 

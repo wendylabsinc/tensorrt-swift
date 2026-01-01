@@ -6,9 +6,8 @@
 // 3. Collecting and aggregating results
 // 4. Measuring per-batch and total latency
 //
-// Run with: swift run BatchProcessing
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run BatchProcessing
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -27,8 +26,8 @@ struct BatchProcessing {
 
         // Step 1: Build the engine
         print("\n1. Building TensorRT engine...")
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: elementCount)
-        let runtime = TensorRTLLMRuntime()
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: elementCount)
+        let runtime = TensorRTRuntime()
         let engine = try runtime.deserializeEngine(from: plan)
         print("   Engine ready (plan size: \(plan.count) bytes)")
 

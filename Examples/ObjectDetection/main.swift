@@ -8,9 +8,8 @@
 //
 // Note: Uses simulated model since real weights are large
 //
-// Run with: swift run ObjectDetection
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run ObjectDetection
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -61,9 +60,13 @@ struct ObjectDetection {
         // Step 1: Build detection model
         print("1. Building detection model...")
         let outputSize = numAnchors * (4 + numClasses)  // boxes + class scores
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: min(outputSize, 8192))
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: min(outputSize, 8192))
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
         let context = try engine.makeExecutionContext()
+        let warmup = try await context.warmup(iterations: 1)
+        if let avg = warmup.average {
+            print("   Context warmup: \(formatDuration(avg))")
+        }
         print("   Model: YOLOv8-style, \(numAnchors) anchors, \(numClasses) classes")
         print("   Input: \(imageSize)x\(imageSize) RGB")
 
@@ -79,6 +82,7 @@ struct ObjectDetection {
         let preprocessDuration = ContinuousClock.now - preprocessStart
         print("   Applied: resize, normalize, CHW format")
         print("   Preprocessing time: \(preprocessDuration)")
+        print("   Preprocessed elements: \(preprocessed.count)")
 
         // Step 4: Run inference
         print("\n4. Running detection inference...")

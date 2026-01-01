@@ -5,9 +5,8 @@
 // 2. Reshaping inputs at runtime for different batch sizes
 // 3. Processing variable-length batches efficiently
 //
-// Run with: swift run DynamicBatching
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run DynamicBatching
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -46,7 +45,7 @@ struct DynamicBatching {
             ]
         )
 
-        let runtime = TensorRTLLMRuntime()
+        let runtime = TensorRTRuntime()
         let engine = try runtime.buildEngine(
             onnxURL: onnxURL,
             options: EngineBuildOptions(
@@ -150,7 +149,7 @@ struct DynamicBatching {
         let onnxBase64 = "CAc6VAoZCgVpbnB1dBIGb3V0cHV0IghJZGVudGl0eRIQRHluSWRlbnRpdHlHcmFwaFoRCgVpbnB1dBIICgYIARICCgBiEgoGb3V0cHV0EggKBggBEgIKAEIECgAQDQ=="
 
         guard let onnxData = Data(base64Encoded: onnxBase64) else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to decode ONNX model")
+            throw TensorRTError.runtimeUnavailable("Failed to decode ONNX model")
         }
 
         let tmpDir = FileManager.default.temporaryDirectory

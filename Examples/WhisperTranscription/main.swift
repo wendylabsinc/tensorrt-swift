@@ -8,9 +8,8 @@
 //
 // Note: Uses simulated model since real weights are large
 //
-// Run with: swift run WhisperTranscription
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run WhisperTranscription
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -43,8 +42,8 @@ struct WhisperTranscription {
         // Step 1: Build encoder model
         print("1. Building Whisper encoder model...")
         let encoderOutputSize = 512  // Encoder hidden dimension
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: encoderOutputSize)
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: encoderOutputSize)
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
         let context = try engine.makeExecutionContext()
         print("   Encoder: \(nMels) mel channels, \(maxFrames) max frames")
         print("   Output: \(encoderOutputSize) hidden dimensions")

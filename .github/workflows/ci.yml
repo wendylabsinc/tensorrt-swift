@@ -30,7 +30,7 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             tensorrt-swift-ci:${{ github.sha }} \
-            swift build
+            ./scripts/swiftw build
 
       - name: Run Tests
         run: |
@@ -38,7 +38,7 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             tensorrt-swift-ci:${{ github.sha }} \
-            swift test
+            ./scripts/swiftw test
 
       - name: Fix permissions
         if: always()

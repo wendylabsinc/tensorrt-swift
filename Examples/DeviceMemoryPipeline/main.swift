@@ -6,13 +6,12 @@
 // 3. Chaining operations on the GPU
 // 4. Measuring the speedup from avoiding memory transfers
 //
-// Run with: swift run DeviceMemoryPipeline
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run DeviceMemoryPipeline
+import TensorRT
 import FoundationEssentials
 
-#if canImport(TensorRTLLMNative)
-import TensorRTLLMNative
+#if canImport(TensorRTNative)
+import TensorRTNative
 #endif
 
 @main
@@ -20,7 +19,7 @@ struct DeviceMemoryPipeline {
     static func main() async throws {
         print("=== Device Memory Pipeline Example ===\n")
 
-#if canImport(TensorRTLLMNative)
+#if canImport(TensorRTNative)
         // Configuration
         let elementCount = 4096  // Large enough to see transfer overhead
         let pipelineStages = 5   // Number of inference stages
@@ -33,8 +32,8 @@ struct DeviceMemoryPipeline {
 
         // Step 1: Build engine
         print("\n1. Building TensorRT engine...")
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: elementCount)
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: elementCount)
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
         let context = try engine.makeExecutionContext()
         print("   Engine ready")
 
@@ -47,7 +46,7 @@ struct DeviceMemoryPipeline {
         for i in 0..<(pipelineStages + 1) {
             var buffer: UInt64 = 0
             guard trt_cuda_malloc(byteCount, &buffer) == 0 else {
-                throw TensorRTLLMError.runtimeUnavailable("Failed to allocate buffer \(i)")
+                throw TensorRTError.runtimeUnavailable("Failed to allocate buffer \(i)")
             }
             deviceBuffers.append(buffer)
             print("   Buffer \(i): 0x\(String(buffer, radix: 16))")
@@ -141,12 +140,12 @@ struct DeviceMemoryPipeline {
 
         var stream: UInt64 = 0
         guard trt_cuda_stream_create(&stream) == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to create stream")
+            throw TensorRTError.runtimeUnavailable("Failed to create stream")
         }
         defer { _ = trt_cuda_stream_destroy(stream) }
 
         let asyncContext = try engine.makeExecutionContext(queue: .external(streamIdentifier: stream))
-        let event = try TensorRTLLMSystem.CUDAEvent()
+        let event = try TensorRTSystem.CUDAEvent()
 
         let doubleBufferStart = ContinuousClock.now
 
@@ -217,7 +216,7 @@ struct DeviceMemoryPipeline {
         print("\n=== Device Memory Pipeline Complete ===")
 
 #else
-        print("This example requires TensorRTLLMNative (Linux with TensorRT)")
+        print("This example requires TensorRTNative (Linux with TensorRT)")
 #endif
     }
 

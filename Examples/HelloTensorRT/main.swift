@@ -1,14 +1,12 @@
-// HelloTensorRT - Minimal TensorRT-LLM Swift Example
+// HelloTensorRT - Minimal TensorRT Swift Example
 //
 // This example demonstrates the basics:
 // 1. Probing the TensorRT runtime version
 // 2. Building a simple identity engine
 // 3. Running inference on the GPU
 //
-// Run with: swift run HelloTensorRT
-
-import TensorRTLLM
-
+// Run with: ./scripts/swiftw run HelloTensorRT
+import TensorRT
 @main
 struct HelloTensorRT {
     static func main() async throws {
@@ -16,17 +14,17 @@ struct HelloTensorRT {
 
         // Step 1: Probe TensorRT version (dynamic dlopen)
         print("1. Probing TensorRT runtime...")
-        let probedVersion = try TensorRTLLMRuntimeProbe.inferRuntimeVersion()
+        let probedVersion = try TensorRTRuntimeProbe.inferRuntimeVersion()
         print("   Probed version: \(probedVersion)")
 
         // Step 2: Get linked library version
         print("\n2. Querying linked TensorRT version...")
-        let linkedVersion = try TensorRTLLMSystem.linkedRuntimeVersion()
+        let linkedVersion = try TensorRTSystem.linkedRuntimeVersion()
         print("   Linked version: \(linkedVersion)")
 
         // Step 3: Check CUDA device availability
         print("\n3. Checking CUDA devices...")
-        let deviceCount = try TensorRTLLMSystem.cudaDeviceCount()
+        let deviceCount = try TensorRTSystem.cudaDeviceCount()
         print("   CUDA devices available: \(deviceCount)")
 
         guard deviceCount > 0 else {
@@ -37,12 +35,12 @@ struct HelloTensorRT {
         // Step 4: Build a minimal identity engine
         print("\n4. Building identity engine (8 elements)...")
         let elementCount = 8
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: elementCount)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: elementCount)
         print("   Engine plan size: \(plan.count) bytes")
 
         // Step 5: Deserialize and inspect the engine
         print("\n5. Deserializing engine...")
-        let runtime = TensorRTLLMRuntime()
+        let runtime = TensorRTRuntime()
         let engine = try runtime.deserializeEngine(from: plan)
 
         print("   Inputs:")
@@ -59,7 +57,7 @@ struct HelloTensorRT {
         let input: [Float] = (0..<elementCount).map { Float($0) * 1.5 }
         print("   Input:  \(input)")
 
-        let output = try TensorRTLLMSystem.runIdentityPlanF32(plan: plan, input: input)
+        let output = try TensorRTSystem.runIdentityPlanF32(plan: plan, input: input)
         print("   Output: \(output)")
 
         let match = input == output

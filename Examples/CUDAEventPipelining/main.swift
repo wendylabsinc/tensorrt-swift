@@ -6,13 +6,12 @@
 // 3. Double/triple buffering for maximum throughput
 // 4. Event-based synchronization patterns
 //
-// Run with: swift run CUDAEventPipelining
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run CUDAEventPipelining
+import TensorRT
 import FoundationEssentials
 
-#if canImport(TensorRTLLMNative)
-import TensorRTLLMNative
+#if canImport(TensorRTNative)
+import TensorRTNative
 #endif
 
 @main
@@ -20,7 +19,7 @@ struct CUDAEventPipelining {
     static func main() async throws {
         print("=== CUDA Event Pipelining Example ===\n")
 
-#if canImport(TensorRTLLMNative)
+#if canImport(TensorRTNative)
         // Configuration
         let elementCount = 8192
         let numIterations = 200
@@ -33,8 +32,8 @@ struct CUDAEventPipelining {
 
         // Step 1: Build engine
         print("\n1. Building TensorRT engine...")
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: elementCount)
-        let engine = try TensorRTLLMRuntime().deserializeEngine(from: plan)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: elementCount)
+        let engine = try TensorRTRuntime().deserializeEngine(from: plan)
 
         // Step 2: Create multiple streams for pipelining
         print("\n2. Creating CUDA streams...")
@@ -45,7 +44,7 @@ struct CUDAEventPipelining {
         guard trt_cuda_stream_create(&computeStream) == 0,
               trt_cuda_stream_create(&h2dStream) == 0,
               trt_cuda_stream_create(&d2hStream) == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to create streams")
+            throw TensorRTError.runtimeUnavailable("Failed to create streams")
         }
         defer {
             _ = trt_cuda_stream_destroy(computeStream)
@@ -70,7 +69,7 @@ struct CUDAEventPipelining {
               trt_cuda_malloc(byteCount, &dInput1) == 0,
               trt_cuda_malloc(byteCount, &dOutput0) == 0,
               trt_cuda_malloc(byteCount, &dOutput1) == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to allocate buffers")
+            throw TensorRTError.runtimeUnavailable("Failed to allocate buffers")
         }
         defer {
             _ = trt_cuda_free(dInput0)
@@ -85,11 +84,10 @@ struct CUDAEventPipelining {
         print("   Input buffers:  [0x\(String(dInput0, radix: 16)), 0x\(String(dInput1, radix: 16))]")
         print("   Output buffers: [0x\(String(dOutput0, radix: 16)), 0x\(String(dOutput1, radix: 16))]")
 
-        // Step 4: Create events for synchronization
-        print("\n4. Creating CUDA events...")
-        let h2dComplete = try TensorRTLLMSystem.CUDAEvent()
-        let computeComplete = try TensorRTLLMSystem.CUDAEvent()
-        print("   Events created for H2D and compute synchronization")
+        // Step 4: Create event for synchronization
+        print("\n4. Creating CUDA event...")
+        let computeComplete = try TensorRTSystem.CUDAEvent()
+        print("   Event created for compute synchronization")
 
         // Prepare host data
         let inputs: [[Float]] = (0..<numIterations).map { i in
@@ -231,7 +229,7 @@ struct CUDAEventPipelining {
         print("\n=== CUDA Event Pipelining Complete ===")
 
 #else
-        print("This example requires TensorRTLLMNative (Linux with TensorRT)")
+        print("This example requires TensorRTNative (Linux with TensorRT)")
 #endif
     }
 

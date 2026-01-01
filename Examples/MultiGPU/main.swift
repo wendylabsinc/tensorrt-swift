@@ -6,13 +6,12 @@
 // 3. Load balancing across multiple GPUs
 // 4. Parallel inference on multiple devices
 //
-// Run with: swift run MultiGPU
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run MultiGPU
+import TensorRT
 import FoundationEssentials
 
-#if canImport(TensorRTLLMNative)
-import TensorRTLLMNative
+#if canImport(TensorRTNative)
+import TensorRTNative
 #endif
 
 @main
@@ -20,10 +19,10 @@ struct MultiGPU {
     static func main() async throws {
         print("=== Multi-GPU Example ===\n")
 
-#if canImport(TensorRTLLMNative)
+#if canImport(TensorRTNative)
         // Step 1: Query available GPUs
         print("1. Querying CUDA devices...")
-        let deviceCount = try TensorRTLLMSystem.cudaDeviceCount()
+        let deviceCount = try TensorRTSystem.cudaDeviceCount()
         print("   Available GPUs: \(deviceCount)")
 
         if deviceCount < 1 {
@@ -34,12 +33,12 @@ struct MultiGPU {
         // Step 2: Build engine plan (shared across GPUs)
         print("\n2. Building shared engine plan...")
         let elementCount = 2048
-        let plan = try TensorRTLLMSystem.buildIdentityEnginePlan(elementCount: elementCount)
+        let plan = try TensorRTSystem.buildIdentityEnginePlan(elementCount: elementCount)
         print("   Engine plan size: \(plan.count) bytes")
 
         // Step 3: Create engines on each GPU
         print("\n3. Creating engines on each GPU...")
-        let runtime = TensorRTLLMRuntime()
+        let runtime = TensorRTRuntime()
 
         var engines: [(gpu: Int, engine: Engine, context: ExecutionContext)] = []
 
@@ -172,7 +171,7 @@ struct MultiGPU {
         print("\n=== Multi-GPU Example Complete ===")
 
 #else
-        print("This example requires TensorRTLLMNative (Linux with TensorRT)")
+        print("This example requires TensorRTNative (Linux with TensorRT)")
 #endif
     }
 

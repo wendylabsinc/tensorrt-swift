@@ -4,8 +4,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "TensorRTLLM",
+    name: "TensorRT",
     products: [
+        .library(
+            name: "TensorRT",
+            targets: ["TensorRT"]
+        ),
         .library(
             name: "TensorRTLLM",
             targets: ["TensorRTLLM"]
@@ -34,7 +38,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "TensorRTLLMNative",
+            name: "TensorRTNative",
             publicHeadersPath: "include",
             cxxSettings: [
                 .unsafeFlags(["-std=c++17"], .when(platforms: [.linux])),
@@ -49,106 +53,112 @@ let package = Package(
             ]
         ),
         .target(
+            name: "TensorRT",
+            dependencies: [
+                .target(name: "TensorRTNative", condition: .when(platforms: [.linux])),
+            ]
+        ),
+        .target(
             name: "TensorRTLLM",
             dependencies: [
-                .target(name: "TensorRTLLMNative", condition: .when(platforms: [.linux])),
+                "TensorRT",
             ]
         ),
         .testTarget(
-            name: "TensorRTLLMTests",
-            dependencies: ["TensorRTLLM"]
+            name: "TensorRTTests",
+            dependencies: ["TensorRT"]
         ),
 
         // MARK: - Beginner Examples
         .executableTarget(
             name: "HelloTensorRT",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/HelloTensorRT"
         ),
         .executableTarget(
             name: "ONNXInference",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/ONNXInference"
         ),
         .executableTarget(
             name: "BatchProcessing",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/BatchProcessing"
         ),
 
         // MARK: - Intermediate Examples
         .executableTarget(
             name: "DynamicBatching",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/DynamicBatching"
         ),
         .executableTarget(
             name: "MultiProfile",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/MultiProfile"
         ),
         .executableTarget(
             name: "AsyncInference",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/AsyncInference"
         ),
         .executableTarget(
             name: "ImageClassifier",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/ImageClassifier"
         ),
         .executableTarget(
             name: "DeviceMemoryPipeline",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/DeviceMemoryPipeline"
         ),
 
         // MARK: - Advanced Examples
         .executableTarget(
             name: "StreamingLLM",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/StreamingLLM"
         ),
         .executableTarget(
             name: "MultiGPU",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/MultiGPU"
         ),
         .executableTarget(
             name: "CUDAEventPipelining",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/CUDAEventPipelining"
         ),
         .executableTarget(
             name: "BenchmarkSuite",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/BenchmarkSuite"
         ),
         .executableTarget(
             name: "FP16Quantization",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/FP16Quantization"
         ),
 
         // MARK: - Real-World Examples
         .executableTarget(
             name: "TextEmbedding",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/TextEmbedding"
         ),
         .executableTarget(
             name: "ObjectDetection",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/ObjectDetection"
         ),
         .executableTarget(
             name: "WhisperTranscription",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/WhisperTranscription"
         ),
         .executableTarget(
             name: "VisionTransformer",
-            dependencies: ["TensorRTLLM"],
+            dependencies: ["TensorRT"],
             path: "Examples/VisionTransformer"
         ),
     ],

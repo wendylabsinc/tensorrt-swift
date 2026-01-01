@@ -1,6 +1,6 @@
 import Glibc
 
-public enum TensorRTLLMRuntimeProbe {
+public enum TensorRTRuntimeProbe {
     public struct Version: Sendable, Hashable, CustomStringConvertible {
         public var major: Int
         public var minor: Int
@@ -49,7 +49,7 @@ public enum TensorRTLLMRuntimeProbe {
             }
         }
 
-        throw TensorRTLLMError.runtimeUnavailable(lastError ?? "Unable to locate TensorRT shared libraries")
+        throw TensorRTError.runtimeUnavailable(lastError ?? "Unable to locate TensorRT shared libraries")
     }
 
     private static func resolveVersion(from handle: UnsafeMutableRawPointer) throws -> Version {
@@ -57,7 +57,7 @@ public enum TensorRTLLMRuntimeProbe {
 
         func load(_ symbol: String) throws -> IntFn {
             guard let sym = dlsym(handle, symbol) else {
-                throw TensorRTLLMError.runtimeUnavailable("Missing TensorRT symbol \(symbol): \(dlErrorString() ?? "unknown error")")
+                throw TensorRTError.runtimeUnavailable("Missing TensorRT symbol \(symbol): \(dlErrorString() ?? "unknown error")")
             }
             return unsafeBitCast(sym, to: IntFn.self)
         }
@@ -68,7 +68,7 @@ public enum TensorRTLLMRuntimeProbe {
         let build = Int(try load("getInferLibBuildVersion")())
 
         if major <= 0 {
-            throw TensorRTLLMError.runtimeUnavailable("TensorRT reported invalid major version \(major)")
+            throw TensorRTError.runtimeUnavailable("TensorRT reported invalid major version \(major)")
         }
 
         return Version(major: major, minor: minor, patch: patch, build: build)

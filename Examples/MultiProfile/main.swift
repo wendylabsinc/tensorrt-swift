@@ -5,9 +5,8 @@
 // 2. Switching between profiles at runtime
 // 3. Optimizing for different batch size ranges
 //
-// Run with: swift run MultiProfile
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run MultiProfile
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -69,7 +68,7 @@ struct MultiProfile {
         print("\n3. Building engine with 3 profiles...")
         let buildStart = ContinuousClock.now
 
-        let runtime = TensorRTLLMRuntime()
+        let runtime = TensorRTRuntime()
         let engine = try runtime.buildEngine(
             onnxURL: onnxURL,
             options: EngineBuildOptions(
@@ -196,7 +195,7 @@ struct MultiProfile {
         let onnxBase64 = "CAc6VAoZCgVpbnB1dBIGb3V0cHV0IghJZGVudGl0eRIQRHluSWRlbnRpdHlHcmFwaFoRCgVpbnB1dBIICgYIARICCgBiEgoGb3V0cHV0EggKBggBEgIKAEIECgAQDQ=="
 
         guard let onnxData = Data(base64Encoded: onnxBase64) else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to decode ONNX model")
+            throw TensorRTError.runtimeUnavailable("Failed to decode ONNX model")
         }
 
         let tmpDir = FileManager.default.temporaryDirectory

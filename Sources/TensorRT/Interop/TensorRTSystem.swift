@@ -1,15 +1,15 @@
 import FoundationEssentials
 
-#if canImport(TensorRTLLMNative)
-import TensorRTLLMNative
+#if canImport(TensorRTNative)
+import TensorRTNative
 
 /// Direct bindings to the system-installed TensorRT library (via a small C++ shim).
 ///
 /// This is intentionally minimal: it exists to prove linkage, validate runtime availability,
 /// and provide basic lifecycle primitives for future engine/context support.
-public enum TensorRTLLMSystem {
+public enum TensorRTSystem {
     /// Returns the TensorRT runtime version reported by the linked `libnvinfer.so`.
-    public static func linkedRuntimeVersion() throws -> TensorRTLLMRuntimeProbe.Version {
+    public static func linkedRuntimeVersion() throws -> TensorRTRuntimeProbe.Version {
         var major: Int32 = 0
         var minor: Int32 = 0
         var patch: Int32 = 0
@@ -17,10 +17,10 @@ public enum TensorRTLLMSystem {
 
         let status = trt_get_version(&major, &minor, &patch, &build)
         guard status == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Unable to query TensorRT version from linked libnvinfer (status \(status)).")
+            throw TensorRTError.runtimeUnavailable("Unable to query TensorRT version from linked libnvinfer (status \(status)).")
         }
 
-        return TensorRTLLMRuntimeProbe.Version(
+        return TensorRTRuntimeProbe.Version(
             major: Int(major),
             minor: Int(minor),
             patch: Int(patch),
@@ -35,7 +35,7 @@ public enum TensorRTLLMSystem {
     public static func initializePlugins() throws {
         let status = trt_plugins_initialize()
         guard status == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("TensorRT plugin initialization failed (status \(status)).")
+            throw TensorRTError.runtimeUnavailable("TensorRT plugin initialization failed (status \(status)).")
         }
     }
 
@@ -47,7 +47,7 @@ public enum TensorRTLLMSystem {
             trt_plugins_load_library(cStr)
         }
         guard status == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to load TensorRT plugin library at \(path) (status \(status)).")
+            throw TensorRTError.runtimeUnavailable("Failed to load TensorRT plugin library at \(path) (status \(status)).")
         }
     }
 
@@ -56,7 +56,7 @@ public enum TensorRTLLMSystem {
         var count: Int32 = 0
         let status = trt_cuda_device_count(&count)
         guard status == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to query CUDA device count (status \(status)).")
+            throw TensorRTError.runtimeUnavailable("Failed to query CUDA device count (status \(status)).")
         }
         return Int(count)
     }
@@ -86,7 +86,7 @@ public enum TensorRTLLMSystem {
     ///
     /// Example:
     /// ```swift
-    /// let memInfo = try TensorRTLLMSystem.memoryInfo(device: 0)
+    /// let memInfo = try TensorRTSystem.memoryInfo(device: 0)
     /// print("Free: \(memInfo.free / 1_000_000_000) GB")
     /// print("Total: \(memInfo.total / 1_000_000_000) GB")
     /// ```
@@ -95,7 +95,7 @@ public enum TensorRTLLMSystem {
         var total: Int = 0
         let status = trt_cuda_mem_get_info(Int32(device), &free, &total)
         guard status == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to query GPU memory info (status \(status)).")
+            throw TensorRTError.runtimeUnavailable("Failed to query GPU memory info (status \(status)).")
         }
         return MemoryInfo(free: free, total: total)
     }
@@ -144,7 +144,7 @@ public enum TensorRTLLMSystem {
     ///
     /// Example:
     /// ```swift
-    /// let props = try TensorRTLLMSystem.deviceProperties(device: 0)
+    /// let props = try TensorRTSystem.deviceProperties(device: 0)
     /// print("GPU: \(props.name)")
     /// print("Compute Capability: \(props.computeCapability)")
     /// print("Memory: \(props.totalMemory / 1_000_000_000) GB")
@@ -153,7 +153,7 @@ public enum TensorRTLLMSystem {
         var props = trt_device_properties()
         let status = trt_cuda_get_device_properties(Int32(device), &props)
         guard status == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to query device properties (status \(status)).")
+            throw TensorRTError.runtimeUnavailable("Failed to query device properties (status \(status)).")
         }
 
         let name = withUnsafePointer(to: &props.name) { ptr in
@@ -182,7 +182,7 @@ public enum TensorRTLLMSystem {
             var stream: UInt64 = 0
             let status = trt_cuda_stream_create(&stream)
             guard status == 0, stream != 0 else {
-                throw TensorRTLLMError.runtimeUnavailable("Failed to create CUDA stream (status \(status)).")
+                throw TensorRTError.runtimeUnavailable("Failed to create CUDA stream (status \(status)).")
             }
             self.rawValue = stream
         }
@@ -195,7 +195,7 @@ public enum TensorRTLLMSystem {
         public func synchronize() throws {
             let status = trt_cuda_stream_synchronize(rawValue)
             guard status == 0 else {
-                throw TensorRTLLMError.runtimeUnavailable("Failed to synchronize CUDA stream (status \(status)).")
+                throw TensorRTError.runtimeUnavailable("Failed to synchronize CUDA stream (status \(status)).")
             }
         }
     }
@@ -206,7 +206,7 @@ public enum TensorRTLLMSystem {
         var size: Int = 0
         let status = trt_build_identity_engine_f32(Int32(elementCount), &rawPtr, &size)
         guard status == 0, let rawPtr, size > 0 else {
-            throw TensorRTLLMError.notImplemented("Failed to build identity engine plan (status \(status)).")
+            throw TensorRTError.notImplemented("Failed to build identity engine plan (status \(status)).")
         }
         defer { trt_free(rawPtr) }
         return Data(bytes: rawPtr, count: size)
@@ -220,7 +220,7 @@ public enum TensorRTLLMSystem {
         var size: Int = 0
         let status = trt_build_dynamic_identity_engine_f32(Int32(min), Int32(opt), Int32(max), &rawPtr, &size)
         guard status == 0, let rawPtr, size > 0 else {
-            throw TensorRTLLMError.notImplemented("Failed to build dynamic identity engine plan (status \(status)).")
+            throw TensorRTError.notImplemented("Failed to build dynamic identity engine plan (status \(status)).")
         }
         defer { trt_free(rawPtr) }
         return Data(bytes: rawPtr, count: size)
@@ -246,7 +246,7 @@ public enum TensorRTLLMSystem {
             &size
         )
         guard status == 0, let rawPtr, size > 0 else {
-            throw TensorRTLLMError.notImplemented("Failed to build dual-profile identity engine plan (status \(status)).")
+            throw TensorRTError.notImplemented("Failed to build dual-profile identity engine plan (status \(status)).")
         }
         defer { trt_free(rawPtr) }
         return Data(bytes: rawPtr, count: size)
@@ -262,7 +262,7 @@ public enum TensorRTLLMSystem {
         var size: Int = 0
         let status = trt_build_identity_engine_f32(Int32(elementCount), &rawPtr, &size)
         guard status == 0, let rawPtr, size > 0 else {
-            throw TensorRTLLMError.notImplemented("Failed to build identity engine plan (status \(status)).")
+            throw TensorRTError.notImplemented("Failed to build identity engine plan (status \(status)).")
         }
         defer { trt_free(rawPtr) }
 
@@ -295,7 +295,7 @@ public enum TensorRTLLMSystem {
         }
 
         guard status == 0 else {
-            throw TensorRTLLMError.runtimeUnavailable("TensorRT identity execution failed (status \(status)).")
+            throw TensorRTError.runtimeUnavailable("TensorRT identity execution failed (status \(status)).")
         }
         return output
     }
@@ -307,7 +307,7 @@ public enum TensorRTLLMSystem {
         public init() throws {
             let handle = trt_create_runtime()
             guard handle != 0 else {
-                throw TensorRTLLMError.runtimeUnavailable("Failed to create TensorRT runtime (createInferRuntime returned null).")
+                throw TensorRTError.runtimeUnavailable("Failed to create TensorRT runtime (createInferRuntime returned null).")
             }
             self.handle = handle
         }
@@ -324,7 +324,7 @@ public enum TensorRTLLMSystem {
         public init() throws {
             let handle = trt_create_builder()
             guard handle != 0 else {
-                throw TensorRTLLMError.runtimeUnavailable("Failed to create TensorRT builder (createInferBuilder returned null).")
+                throw TensorRTError.runtimeUnavailable("Failed to create TensorRT builder (createInferBuilder returned null).")
             }
             self.handle = handle
         }
@@ -342,7 +342,7 @@ public enum TensorRTLLMSystem {
             var ev: UInt64 = 0
             let status = trt_cuda_event_create(&ev)
             guard status == 0, ev != 0 else {
-                throw TensorRTLLMError.runtimeUnavailable("Failed to create CUDA event (status \(status)).")
+                throw TensorRTError.runtimeUnavailable("Failed to create CUDA event (status \(status)).")
             }
             self.rawValue = ev
         }
@@ -354,14 +354,14 @@ public enum TensorRTLLMSystem {
         public func record(on stream: UInt64) throws {
             let status = trt_cuda_event_record(rawValue, stream)
             guard status == 0 else {
-                throw TensorRTLLMError.runtimeUnavailable("Failed to record CUDA event (status \(status)).")
+                throw TensorRTError.runtimeUnavailable("Failed to record CUDA event (status \(status)).")
             }
         }
 
         public func synchronize() throws {
             let status = trt_cuda_event_synchronize(rawValue)
             guard status == 0 else {
-                throw TensorRTLLMError.runtimeUnavailable("Failed to synchronize CUDA event (status \(status)).")
+                throw TensorRTError.runtimeUnavailable("Failed to synchronize CUDA event (status \(status)).")
             }
         }
 
@@ -369,7 +369,7 @@ public enum TensorRTLLMSystem {
             var ready: Int32 = 0
             let status = trt_cuda_event_query(rawValue, &ready)
             guard status == 0 else {
-                throw TensorRTLLMError.runtimeUnavailable("Failed to query CUDA event (status \(status)).")
+                throw TensorRTError.runtimeUnavailable("Failed to query CUDA event (status \(status)).")
             }
             return ready != 0
         }

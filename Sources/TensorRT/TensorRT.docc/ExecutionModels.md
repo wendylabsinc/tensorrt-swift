@@ -37,7 +37,7 @@ When using an external CUDA stream via ``ExecutionQueue/external(streamIdentifie
 let ctx = try engine.makeExecutionContext(queue: .external(streamIdentifier: stream))
 try await ctx.enqueueDevice(..., synchronously: false)
 
-let event = try TensorRTLLMSystem.CUDAEvent()
+let event = try TensorRTSystem.CUDAEvent()
 try await ctx.recordEvent(event)
 try event.synchronize()
 ```
@@ -47,7 +47,7 @@ try event.synchronize()
 To target a non-zero GPU, set ``DeviceSelection/gpu`` at build/load time:
 
 ```swift
-let engine = try TensorRTLLMRuntime().deserializeEngine(
+let engine = try TensorRTRuntime().deserializeEngine(
     from: plan,
     configuration: EngineLoadConfiguration(device: DeviceSelection(gpu: 1))
 )

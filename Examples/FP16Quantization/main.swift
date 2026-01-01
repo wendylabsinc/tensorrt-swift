@@ -6,9 +6,8 @@
 // 3. Measuring performance differences
 // 4. Understanding precision trade-offs
 //
-// Run with: swift run FP16Quantization
-
-import TensorRTLLM
+// Run with: ./scripts/swiftw run FP16Quantization
+import TensorRT
 import FoundationEssentials
 
 @main
@@ -32,14 +31,15 @@ struct FP16Quantization {
         defer { try? FileManager.default.removeItem(at: onnxURL.deletingLastPathComponent()) }
         print("   Model created: \(elementCount) float elements")
 
-        let runtime = TensorRTLLMRuntime()
+        let runtime = TensorRTRuntime()
+        let shapeHints: [String: TensorShape] = ["input": TensorShape([elementCount])]
 
         // Step 2: Build FP32 engine
         print("\n2. Building FP32 engine...")
         let fp32Start = ContinuousClock.now
         let fp32Engine = try runtime.buildEngine(
             onnxURL: onnxURL,
-            options: EngineBuildOptions(precision: [.fp32])
+            options: EngineBuildOptions(precision: [.fp32], shapeHints: shapeHints)
         )
         let fp32BuildTime = ContinuousClock.now - fp32Start
         print("   FP32 build time: \(fp32BuildTime)")
@@ -50,7 +50,7 @@ struct FP16Quantization {
         let fp16Start = ContinuousClock.now
         let fp16Engine = try runtime.buildEngine(
             onnxURL: onnxURL,
-            options: EngineBuildOptions(precision: [.fp16])
+            options: EngineBuildOptions(precision: [.fp16], shapeHints: shapeHints)
         )
         let fp16BuildTime = ContinuousClock.now - fp16Start
         print("   FP16 build time: \(fp16BuildTime)")
@@ -204,7 +204,7 @@ struct FP16Quantization {
         let onnxBase64 = "CAc6VAoZCgVpbnB1dBIGb3V0cHV0IghJZGVudGl0eRIQRHluSWRlbnRpdHlHcmFwaFoRCgVpbnB1dBIICgYIARICCgBiEgoGb3V0cHV0EggKBggBEgIKAEIECgAQDQ=="
 
         guard let onnxData = Data(base64Encoded: onnxBase64) else {
-            throw TensorRTLLMError.runtimeUnavailable("Failed to decode ONNX model")
+            throw TensorRTError.runtimeUnavailable("Failed to decode ONNX model")
         }
 
         let tmpDir = FileManager.default.temporaryDirectory
