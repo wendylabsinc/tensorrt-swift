@@ -100,7 +100,6 @@ swiftly install 6.2
 | `Engine.save(to:)` / `Engine.load(from:)` | Persist/load engines to disk |
 | `ExecutionContext.enqueue(_:)` | Execute inference (host buffers) |
 | `ExecutionContext.enqueueDevice(...)` | Execute with device pointers |
-| `ExecutionContext.stream(...)` | Streaming inference (AsyncSequence) |
 | `ExecutionContext.warmup(iterations:)` | Warmup for stable latency |
 
 ### GPU & Device APIs
@@ -121,6 +120,14 @@ swiftly install 6.2
 | `ExecutionContext.setOptimizationProfile(named:)` | Switch optimization profiles |
 | `OptimizationProfile` | Define min/opt/max shapes |
 
+### LLM Extensions (TensorRTLLM)
+
+| API | Description |
+|-----|-------------|
+| `ExecutionContext.stream(...)` | Streaming inference (AsyncSequence) |
+| `StreamingConfiguration` | Configure token-by-token generation |
+| `StreamingInferenceStep` | Per-step metadata and outputs |
+
 ### Swift-y Conveniences
 
 ```swift
@@ -132,9 +139,6 @@ print(shape[0])     // 1
 // Engine persistence
 try engine.save(to: URL(fileURLWithPath: "model.engine"))
 let loaded = try Engine.load(from: URL(fileURLWithPath: "model.engine"))
-
-// Streaming inference (AsyncSequence)
-for try await step in context.stream(initialBatch: batch, configuration: config) { ... }
 
 // Query GPU before loading
 let mem = try TensorRTSystem.memoryInfo()
@@ -165,7 +169,7 @@ let package = Package(
 )
 ```
 
-To use the LLM extension module instead:
+To use the LLM extension module for streaming inference and other LLM utilities:
 
 ```swift
 .product(name: "TensorRTLLM", package: "tensorrt-swift")
@@ -225,7 +229,7 @@ let result = try await ctx.enqueue(batch)
 ### Streaming inference (for LLMs)
 
 ```swift
-import TensorRT
+import TensorRTLLM
 let stream = context.stream(
     initialBatch: promptBatch,
     configuration: StreamingConfiguration(maxSteps: 100)

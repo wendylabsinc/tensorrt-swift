@@ -9,7 +9,7 @@
 // Note: Uses simulated model since real LLM weights are large
 //
 // Run with: ./scripts/swiftw run StreamingLLM
-import TensorRT
+import TensorRTLLM
 import FoundationEssentials
 
 #if canImport(TensorRTNative)
