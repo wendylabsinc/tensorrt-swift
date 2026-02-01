@@ -225,10 +225,18 @@ int trt_get_version(int* major, int* minor, int* patch, int* build) {
   }
 
   // These are exported by libnvinfer as stable C-callable symbols.
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
   *major = getInferLibMajorVersion();
   *minor = getInferLibMinorVersion();
   *patch = getInferLibPatchVersion();
   *build = getInferLibBuildVersion();
+#else
+  const int version = getInferLibVersion();
+  *major = version / 1000;
+  *minor = (version / 100) % 10;
+  *patch = (version / 10) % 10;
+  *build = version % 10;
+#endif
   return (*major > 0) ? 0 : 2;
 }
 
@@ -1042,6 +1050,11 @@ int trt_execute_plan_host(
     return 5;
   }
 
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR < 10
+  int32_t bindingCount = static_cast<int32_t>(engine->getNbBindings());
+  std::vector<void*> bindings(static_cast<size_t>(bindingCount), nullptr);
+#endif
+
   // Allocate per-input/output device buffers and set addresses.
   // This is intentionally conservative and assumes the caller provides correct byte sizes.
   // Future work: introspect engine sizes and validate.
@@ -1082,8 +1095,14 @@ int trt_execute_plan_host(
       return fail(9);
     }
 #else
-    // Not supported in this minimal shim for TRT < 10.
-    return fail(100);
+    int32_t bindingIndex = engine->getBindingIndex(in.name);
+    if (bindingIndex < 0) {
+      return fail(16);
+    }
+    if (!engine->bindingIsInput(bindingIndex)) {
+      return fail(17);
+    }
+    bindings[static_cast<size_t>(bindingIndex)] = reinterpret_cast<void*>(dptr);
 #endif
   }
 
@@ -1105,16 +1124,33 @@ int trt_execute_plan_host(
       return fail(12);
     }
 #else
-    return fail(100);
+    int32_t bindingIndex = engine->getBindingIndex(out.name);
+    if (bindingIndex < 0) {
+      return fail(18);
+    }
+    if (engine->bindingIsInput(bindingIndex)) {
+      return fail(19);
+    }
+    bindings[static_cast<size_t>(bindingIndex)] = reinterpret_cast<void*>(dptr);
 #endif
   }
+
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR < 10
+  for (int32_t i = 0; i < bindingCount; i++) {
+    if (!bindings[static_cast<size_t>(i)]) {
+      return fail(20);
+    }
+  }
+#endif
 
 #if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 10
   if (!exec->enqueueV3(reinterpret_cast<cudaStream_t>(stream.stream()))) {
     return fail(13);
   }
 #else
-  return fail(100);
+  if (!exec->enqueueV2(bindings.data(), reinterpret_cast<cudaStream_t>(stream.stream()), nullptr)) {
+    return fail(13);
+  }
 #endif
 
   // Copy outputs back to host. Output device allocations are after input allocations.
@@ -1851,7 +1887,7 @@ int trt_run_identity_plan_f32(const void* plan, size_t planSize, const float* in
   void* bindings[2];
   bindings[0] = reinterpret_cast<void*>(dInput);
   bindings[1] = reinterpret_cast<void*>(dOutput);
-  if (!exec->enqueueV2(bindings, reinterpret_cast<cudaStream_t>(stream), nullptr)) {
+  if (!exec->enqueueV2(bindings, reinterpret_cast<cudaStream_t>(stream.stream()), nullptr)) {
     cuMemFree(dOutput);
     cuMemFree(dInput);
     trtDestroy(exec);

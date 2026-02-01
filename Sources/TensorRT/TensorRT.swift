@@ -909,6 +909,8 @@ public actor ExecutionContext: ExecutionContexting {
     private var requestedProfileIndex: Int32 = 0
     private var appliedProfileIndex: Int32?
     private let deviceIndex: Int32
+    private var cachedSupportsPersistentContexts: Bool?
+    private var runtimeVersion: TensorRTRuntimeProbe.Version?
 
     public init(engine: Engine, queue: ExecutionQueue, allocator: MemoryAllocator = .default) {
         self.engine = engine
@@ -935,6 +937,20 @@ public actor ExecutionContext: ExecutionContexting {
     }
 
 #if canImport(TensorRTNative)
+    private func persistentContextsSupported() -> Bool {
+        if let cachedSupportsPersistentContexts {
+            return cachedSupportsPersistentContexts
+        }
+        if let version = try? TensorRTSystem.linkedRuntimeVersion() {
+            runtimeVersion = version
+            let supports = version.major >= 10
+            cachedSupportsPersistentContexts = supports
+            return supports
+        }
+        cachedSupportsPersistentContexts = false
+        return false
+    }
+
     private func getOrCreateNativeContext(plan: Data) throws -> UInt {
         if let existing = nativeContextHandle?.raw {
             return existing
@@ -1055,6 +1071,140 @@ public actor ExecutionContext: ExecutionContexting {
             }
         }
 
+        let usePersistentContext = persistentContextsSupported()
+        if !usePersistentContext {
+            if requestedProfileIndex != 0 || !engine.description.profileNames.isEmpty {
+                let versionInfo = runtimeVersion.map { "Detected TensorRT \($0)." } ?? "Detected TensorRT < 10."
+                throw TensorRTError.runtimeUnavailable("Stateless execution does not support optimization profiles. \(versionInfo)")
+            }
+            if !inputShapes.isEmpty {
+                throw TensorRTError.runtimeUnavailable("Stateless execution does not support reshape(); requires TensorRT 10+ persistent contexts.")
+            }
+            for binding in inputBindings {
+                if binding.descriptor.shape.isDynamic {
+                    throw TensorRTError.invalidShapeRange("Input \(binding.name) has dynamic shape; requires TensorRT 10+ persistent contexts.")
+                }
+            }
+            for binding in outputBindings {
+                if binding.descriptor.shape.isDynamic {
+                    throw TensorRTError.invalidShapeRange("Output \(binding.name) has dynamic shape; requires TensorRT 10+ persistent contexts.")
+                }
+            }
+            for binding in inputBindings {
+                let expectedBytes = binding.descriptor.shape.elementCount * binding.descriptor.dataType.byteCount
+                if let pair = inputPairs.first(where: { $0.name == binding.name }), pair.data.count != expectedBytes {
+                    throw TensorRTError.runtimeUnavailable("Input \(binding.name) expected \(expectedBytes) bytes for shape \(binding.descriptor.shape.dimensions), got \(pair.data.count).")
+                }
+            }
+
+            let outputPairs: [(name: String, data: Data)] = outputBindings.map { binding in
+                let size = binding.descriptor.shape.elementCount * binding.descriptor.dataType.byteCount
+                return (binding.name, Data(count: size))
+            }
+
+            let inputCount = Int32(inputPairs.count)
+            let outputCount = Int32(outputPairs.count)
+
+            func withCStringPointers<R>(_ strings: [String], _ body: ([UnsafePointer<CChar>]) throws -> R) rethrows -> R {
+                var allocations: [UnsafeMutablePointer<CChar>] = []
+                allocations.reserveCapacity(strings.count)
+                defer { allocations.forEach { $0.deallocate() } }
+
+                let pointers: [UnsafePointer<CChar>] = strings.map { string in
+                    let utf8 = Array(string.utf8CString)
+                    let ptr = UnsafeMutablePointer<CChar>.allocate(capacity: utf8.count)
+                    ptr.initialize(from: utf8, count: utf8.count)
+                    allocations.append(ptr)
+                    return UnsafePointer(ptr)
+                }
+
+                return try body(pointers)
+            }
+
+            func withInputPointers<R>(
+                _ pairs: [(name: String, data: Data)],
+                _ index: Int,
+                _ pointers: inout [UnsafeRawPointer?],
+                _ body: ([UnsafeRawPointer?]) throws -> R
+            ) rethrows -> R {
+                if index == pairs.count {
+                    return try body(pointers)
+                }
+                return try pairs[index].data.withUnsafeBytes { raw in
+                    pointers.append(raw.baseAddress)
+                    defer { pointers.removeLast() }
+                    return try withInputPointers(pairs, index + 1, &pointers, body)
+                }
+            }
+
+            func withOutputPointers<R>(
+                _ index: Int,
+                _ pairs: inout [(name: String, data: Data)],
+                _ pointers: inout [UnsafeMutableRawPointer?],
+                _ body: (inout [(name: String, data: Data)], [UnsafeMutableRawPointer?]) throws -> R
+            ) rethrows -> R {
+                if index == pairs.count {
+                    return try body(&pairs, pointers)
+                }
+                var data = pairs[index].data
+                let result = try data.withUnsafeMutableBytes { raw in
+                    pointers.append(raw.baseAddress)
+                    defer { pointers.removeLast() }
+                    return try withOutputPointers(index + 1, &pairs, &pointers, body)
+                }
+                pairs[index].data = data
+                return result
+            }
+
+            func executeStateless(plan: Data, inputPairs: [(name: String, data: Data)], outputPairs: inout [(name: String, data: Data)]) throws -> Int32 {
+                try withCStringPointers(inputPairs.map(\.name) + outputPairs.map(\.name)) { namePtrs in
+                    var inputPointers: [UnsafeRawPointer?] = []
+                    inputPointers.reserveCapacity(inputPairs.count)
+
+                    return try withInputPointers(inputPairs, 0, &inputPointers) { inPtrs in
+                        var outputPointers: [UnsafeMutableRawPointer?] = []
+                        outputPointers.reserveCapacity(outputPairs.count)
+
+                        return try withOutputPointers(0, &outputPairs, &outputPointers) { pairs, outPtrs in
+                            var inputs: [trt_named_buffer] = []
+                            inputs.reserveCapacity(inputPairs.count)
+                            for i in 0..<inputPairs.count {
+                                inputs.append(trt_named_buffer(name: namePtrs[i], data: inPtrs[i], size: inputPairs[i].data.count))
+                            }
+
+                            var outputs: [trt_named_mutable_buffer] = []
+                            outputs.reserveCapacity(pairs.count)
+                            let outputNameOffset = inputPairs.count
+                            for i in 0..<pairs.count {
+                                outputs.append(trt_named_mutable_buffer(name: namePtrs[outputNameOffset + i], data: outPtrs[i], size: pairs[i].data.count))
+                            }
+
+                            return plan.withUnsafeBytes { planBytes in
+                                guard let baseAddress = planBytes.baseAddress else {
+                                    return Int32(1)
+                                }
+                                return trt_execute_plan_host(baseAddress, planBytes.count, inputs, inputCount, outputs, outputCount)
+                            }
+                        }
+                    }
+                }
+            }
+
+            var mutableOutputs = outputPairs
+            let status = try executeStateless(plan: plan, inputPairs: inputPairs, outputPairs: &mutableOutputs)
+            guard status == 0 else {
+                throw TensorRTError.runtimeUnavailable("TensorRT enqueue failed (status \(status)).")
+            }
+
+            let outputs: [String: TensorValue] = outputBindings.reduce(into: [:]) { dict, binding in
+                guard let item = mutableOutputs.first(where: { $0.name == binding.name }) else { return }
+                let desc = binding.descriptor
+                dict[binding.name] = TensorValue(descriptor: desc, storage: .host(item.data))
+            }
+
+            return InferenceResult(outputs: outputs, duration: nil, metadata: [:], profileUsed: batch.profileName)
+        }
+
         let ctx = try getOrCreateNativeContext(plan: plan)
         try applyOptimizationProfileIfNeeded(ctx: ctx)
 
@@ -1172,8 +1322,45 @@ public actor ExecutionContext: ExecutionContexting {
             }
         }
 
+        func executeStateless(plan: Data, inputPairs: [(name: String, data: Data)], outputPairs: inout [(name: String, data: Data)]) throws -> Int32 {
+            try withCStringPointers(inputPairs.map(\.name) + outputPairs.map(\.name)) { namePtrs in
+                var inputPointers: [UnsafeRawPointer?] = []
+                inputPointers.reserveCapacity(inputPairs.count)
+
+                return try withInputPointers(inputPairs, 0, &inputPointers) { inPtrs in
+                    var outputPointers: [UnsafeMutableRawPointer?] = []
+                    outputPointers.reserveCapacity(outputPairs.count)
+
+                    return try withOutputPointers(0, &outputPairs, &outputPointers) { pairs, outPtrs in
+                        var inputs: [trt_named_buffer] = []
+                        inputs.reserveCapacity(inputPairs.count)
+                        for i in 0..<inputPairs.count {
+                            inputs.append(trt_named_buffer(name: namePtrs[i], data: inPtrs[i], size: inputPairs[i].data.count))
+                        }
+
+                        var outputs: [trt_named_mutable_buffer] = []
+                        outputs.reserveCapacity(pairs.count)
+                        let outputNameOffset = inputPairs.count
+                        for i in 0..<pairs.count {
+                            outputs.append(trt_named_mutable_buffer(name: namePtrs[outputNameOffset + i], data: outPtrs[i], size: pairs[i].data.count))
+                        }
+
+                        return plan.withUnsafeBytes { planBytes in
+                            guard let baseAddress = planBytes.baseAddress else {
+                                return Int32(1)
+                            }
+                            return trt_execute_plan_host(baseAddress, planBytes.count, inputs, inputCount, outputs, outputCount)
+                        }
+                    }
+                }
+            }
+        }
+
         var mutableOutputs = outputPairs
-        let status = try execute(plan: plan, inputPairs: inputPairs, outputPairs: &mutableOutputs)
+        var status = try execute(plan: plan, inputPairs: inputPairs, outputPairs: &mutableOutputs)
+        if status == 100 {
+            status = try executeStateless(plan: plan, inputPairs: inputPairs, outputPairs: &mutableOutputs)
+        }
         guard status == 0 else {
             throw TensorRTError.runtimeUnavailable("TensorRT enqueue failed (status \(status)).")
         }
@@ -1242,6 +1429,8 @@ public actor ExecutionContext: ExecutionContexting {
             output = Array(repeating: 0, count: expectedOutputElements)
         }
 
+        let usePersistentContext = persistentContextsSupported()
+
         func withCString<R>(_ string: String, _ body: (UnsafePointer<CChar>) throws -> R) rethrows -> R {
             let utf8 = Array(string.utf8CString)
             return try utf8.withUnsafeBufferPointer { buffer in
@@ -1272,11 +1461,37 @@ public actor ExecutionContext: ExecutionContexting {
                             size: outBuf.count * MemoryLayout<Float>.stride
                         )
 
-                        let ctx = try getOrCreateNativeContext(plan: plan)
-                        return withUnsafePointer(to: &inputBuffer) { inputPtr in
-                            withUnsafePointer(to: &outputBuffer) { outputPtr in
-                                trt_context_execute_host(ctx, inputPtr, 1, outputPtr, 1)
+                        if !usePersistentContext {
+                            return plan.withUnsafeBytes { planBytes in
+                                guard let baseAddress = planBytes.baseAddress else {
+                                    return Int32(1)
+                                }
+                                return withUnsafePointer(to: &inputBuffer) { inputPtr in
+                                    withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                        trt_execute_plan_host(baseAddress, planBytes.count, inputPtr, 1, outputPtr, 1)
+                                    }
+                                }
                             }
+                        } else {
+                            let ctx = try getOrCreateNativeContext(plan: plan)
+                            let primaryStatus = withUnsafePointer(to: &inputBuffer) { inputPtr in
+                                withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                    trt_context_execute_host(ctx, inputPtr, 1, outputPtr, 1)
+                                }
+                            }
+                            if primaryStatus == 100 {
+                                return plan.withUnsafeBytes { planBytes in
+                                    guard let baseAddress = planBytes.baseAddress else {
+                                        return Int32(1)
+                                    }
+                                    return withUnsafePointer(to: &inputBuffer) { inputPtr in
+                                        withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                            trt_execute_plan_host(baseAddress, planBytes.count, inputPtr, 1, outputPtr, 1)
+                                        }
+                                    }
+                                }
+                            }
+                            return primaryStatus
                         }
                     }
                     output = outArray
@@ -1330,6 +1545,8 @@ public actor ExecutionContext: ExecutionContexting {
             output = Array(repeating: 0, count: expectedOutputBytes)
         }
 
+        let usePersistentContext = persistentContextsSupported()
+
         func withCString<R>(_ string: String, _ body: (UnsafePointer<CChar>) throws -> R) rethrows -> R {
             let utf8 = Array(string.utf8CString)
             return try utf8.withUnsafeBufferPointer { buffer in
@@ -1360,11 +1577,37 @@ public actor ExecutionContext: ExecutionContexting {
                             size: outBuf.count
                         )
 
-                        let ctx = try getOrCreateNativeContext(plan: plan)
-                        return withUnsafePointer(to: &inputBuffer) { inputPtr in
-                            withUnsafePointer(to: &outputBuffer) { outputPtr in
-                                trt_context_execute_host(ctx, inputPtr, 1, outputPtr, 1)
+                        if !usePersistentContext {
+                            return plan.withUnsafeBytes { planBytes in
+                                guard let baseAddress = planBytes.baseAddress else {
+                                    return Int32(1)
+                                }
+                                return withUnsafePointer(to: &inputBuffer) { inputPtr in
+                                    withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                        trt_execute_plan_host(baseAddress, planBytes.count, inputPtr, 1, outputPtr, 1)
+                                    }
+                                }
                             }
+                        } else {
+                            let ctx = try getOrCreateNativeContext(plan: plan)
+                            let primaryStatus = withUnsafePointer(to: &inputBuffer) { inputPtr in
+                                withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                    trt_context_execute_host(ctx, inputPtr, 1, outputPtr, 1)
+                                }
+                            }
+                            if primaryStatus == 100 {
+                                return plan.withUnsafeBytes { planBytes in
+                                    guard let baseAddress = planBytes.baseAddress else {
+                                        return Int32(1)
+                                    }
+                                    return withUnsafePointer(to: &inputBuffer) { inputPtr in
+                                        withUnsafePointer(to: &outputBuffer) { outputPtr in
+                                            trt_execute_plan_host(baseAddress, planBytes.count, inputPtr, 1, outputPtr, 1)
+                                        }
+                                    }
+                                }
+                            }
+                            return primaryStatus
                         }
                     }
                     output = outArray
