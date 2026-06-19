@@ -1173,7 +1173,7 @@ public actor ExecutionContext: ExecutionContexting {
                         var outputPointers: [UnsafeMutableRawPointer?] = []
                         outputPointers.reserveCapacity(outputPairs.count)
 
-                        return try withOutputPointers(0, &outputPairs, &outputPointers) { pairs, outPtrs in
+                        return withOutputPointers(0, &outputPairs, &outputPointers) { pairs, outPtrs in
                             var inputs: [trt_named_buffer] = []
                             inputs.reserveCapacity(inputPairs.count)
                             for i in 0..<inputPairs.count {
@@ -1310,7 +1310,7 @@ public actor ExecutionContext: ExecutionContexting {
                     var outputPointers: [UnsafeMutableRawPointer?] = []
                     outputPointers.reserveCapacity(outputPairs.count)
 
-                    return try withOutputPointers(0, &outputPairs, &outputPointers) { pairs, outPtrs in
+                    return withOutputPointers(0, &outputPairs, &outputPointers) { pairs, outPtrs in
                         var inputs: [trt_named_buffer] = []
                         inputs.reserveCapacity(inputPairs.count)
                         for i in 0..<inputPairs.count {
@@ -1339,7 +1339,7 @@ public actor ExecutionContext: ExecutionContexting {
                     var outputPointers: [UnsafeMutableRawPointer?] = []
                     outputPointers.reserveCapacity(outputPairs.count)
 
-                    return try withOutputPointers(0, &outputPairs, &outputPointers) { pairs, outPtrs in
+                    return withOutputPointers(0, &outputPairs, &outputPointers) { pairs, outPtrs in
                         var inputs: [trt_named_buffer] = []
                         inputs.reserveCapacity(inputPairs.count)
                         for i in 0..<inputPairs.count {
