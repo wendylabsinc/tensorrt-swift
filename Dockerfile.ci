@@ -1,6 +1,6 @@
-FROM nvcr.io/nvidia/tensorrt:24.12-py3
+FROM nvcr.io/nvidia/tensorrt:26.05-py3
 
-# Install Swift 6.2.3 dependencies and download Swift
+# Install Swift 6.3.2 dependencies and download Swift
 RUN apt-get update && apt-get install -y \
     curl \
     libxml2 \
@@ -18,11 +18,11 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and install Swift 6.2.3
-RUN curl -fsSL https://download.swift.org/swift-6.2.3-release/ubuntu2404/swift-6.2.3-RELEASE/swift-6.2.3-RELEASE-ubuntu24.04.tar.gz -o /tmp/swift.tar.gz \
+# Download and install Swift 6.3.2
+RUN curl -fsSL https://download.swift.org/swift-6.3.2-release/ubuntu2404/swift-6.3.2-RELEASE/swift-6.3.2-RELEASE-ubuntu24.04.tar.gz -o /tmp/swift.tar.gz \
     && tar xzf /tmp/swift.tar.gz -C /opt \
     && rm /tmp/swift.tar.gz
 
-ENV PATH="/opt/swift-6.2.3-RELEASE-ubuntu24.04/usr/bin:${PATH}"
+ENV PATH="/opt/swift-6.3.2-RELEASE-ubuntu24.04/usr/bin:${PATH}"
 
 WORKDIR /workspace

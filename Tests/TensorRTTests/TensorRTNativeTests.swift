@@ -1,5 +1,5 @@
 import Testing
-import FoundationEssentials
+import Foundation
 @testable import TensorRT
 
 #if canImport(TensorRTNative)
@@ -251,7 +251,7 @@ private let dynamicOnnxBase64 = "CAc6VAoZCgVpbnB1dBIGb3V0cHV0IghJZGVudGl0eRIQRHl
     }
 }
 
-@Test("Build FP32 and FP16 ONNX engines") func tensorRTONNXPrecisionBuilds() async throws {
+@Test("Build ONNX engines with FP32 and FP16 intent") func tensorRTONNXPrecisionBuilds() async throws {
     // A minimal ONNX identity model (opset 13) with input/output [1,8] float.
     guard let onnxData = Data(base64Encoded: staticOnnxBase64) else {
         throw TensorRTError.runtimeUnavailable("Failed to decode embedded ONNX fixture.")
@@ -267,6 +267,8 @@ private let dynamicOnnxBase64 = "CAc6VAoZCgVpbnB1dBIGb3V0cHV0IghJZGVudGl0eRIQRHl
 
     let runtime = TensorRTRuntime()
     let fp32Engine = try runtime.buildEngine(onnxURL: onnxURL, options: EngineBuildOptions(precision: [.fp32]))
+    // TensorRT 11 removed weak FP16 builder flags; this validates that the Swift
+    // precision intent remains accepted while the ONNX graph owns actual typing.
     let fp16Engine = try runtime.buildEngine(onnxURL: onnxURL, options: EngineBuildOptions(precision: [.fp16]))
 
     #expect(fp32Engine.serialized != nil)

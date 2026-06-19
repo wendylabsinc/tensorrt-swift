@@ -1,4 +1,4 @@
-import FoundationEssentials
+import Foundation
 
 #if canImport(TensorRTNative)
 import TensorRTNative

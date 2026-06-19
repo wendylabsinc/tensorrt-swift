@@ -1,9 +1,9 @@
 # Next Steps for Linux (Kubuntu, NVIDIA GPU)
 
-Target environment: Swift 6.2+, Kubuntu on an NVIDIA GPU (e.g., RTX 4070 Ti), TensorRT/CUDA installed.
+Target environment: Swift 6.3+, Kubuntu on an NVIDIA GPU (e.g., RTX 4070 Ti), TensorRT/CUDA installed.
 
-## 1) Wire the native interface (Swift 6.2 C++ interop)
-- Implement `DefaultTensorRTNativeInterface` in `Sources/TensorRT/Interop/` using Swift 6.2 C++ interop and the Span/InlineArray proposals (see `docs/swift62-features/`).
+## 1) Wire the native interface (Swift C++ interop)
+- Implement `DefaultTensorRTNativeInterface` in `Sources/TensorRT/Interop/` using Swift C++ interop and the Span/InlineArray proposals (see `docs/swift62-features/`).
 - Map APIs:
   - Deserialize/build engines (`deserializeEngine`, `buildEngine` with `NetworkDefinition`, `buildEngine(onnxURL:)`).
   - Create execution contexts, set profiles, reshape, enqueue, warmup.

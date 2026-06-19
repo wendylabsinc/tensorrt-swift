@@ -59,32 +59,6 @@ uint32_t trtNetworkFlags() {
 #endif
 }
 
-void trtEnableFp16(nvinfer1::IBuilderConfig* config) {
-  if (!config) {
-    return;
-  }
-#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 11
-  // TensorRT 11 removed the legacy precision BuilderFlag values such as kFP16.
-  // Precision is represented by strongly typed network/tensor configuration, so
-  // keep this compatibility hook as a no-op for TensorRT 11+ headers.
-  return;
-#else
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#elif defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
-  config->setFlag(nvinfer1::BuilderFlag::kFP16);
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#elif defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
-#endif
-}
-
 bool copyName(char* dst, size_t dstSize, char const* src) {
   if (!dst || dstSize == 0) {
     return false;
@@ -729,14 +703,14 @@ int trt_build_dual_profile_identity_engine_f32(
 
 int trt_build_engine_from_onnx_file(
   const char* onnxPath,
-  int32_t enableFp16,
+  int32_t precisionHints,
   size_t workspaceSizeBytes,
   uint8_t** outData,
   size_t* outSize
 ) {
   return trt_build_engine_from_onnx_file_with_profiles(
     onnxPath,
-    enableFp16,
+    precisionHints,
     workspaceSizeBytes,
     nullptr,
     0,
@@ -748,7 +722,7 @@ int trt_build_engine_from_onnx_file(
 
 int trt_build_engine_from_onnx_file_with_profiles(
   const char* onnxPath,
-  int32_t enableFp16,
+  int32_t precisionHints,
   size_t workspaceSizeBytes,
   const trt_profile_binding_range* profileRanges,
   int32_t profileRangeCount,
@@ -769,6 +743,10 @@ int trt_build_engine_from_onnx_file_with_profiles(
   if (profileRangeCount > 0 && !profileRanges) {
     return 4;
   }
+  // TensorRT 11 removed weak precision builder flags. This argument is retained
+  // for source compatibility with the Swift wrapper, but ONNX precision must be
+  // expressed by typed model graphs, ModelOpt AutoCast, or explicit Q/DQ nodes.
+  (void)precisionHints;
 
   *outData = nullptr;
   *outSize = 0;
@@ -813,10 +791,6 @@ int trt_build_engine_from_onnx_file_with_profiles(
 
   size_t workspace = workspaceSizeBytes != 0 ? workspaceSizeBytes : (1U << 28); // 256MB default
   config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, workspace);
-
-  if (enableFp16 != 0) {
-    trtEnableFp16(config);
-  }
 
   if (profileCount > 0) {
     // Create all profiles first.

@@ -9,7 +9,7 @@
 //
 // If no ONNX file is provided, a minimal identity model is created for demonstration.
 import TensorRT
-import FoundationEssentials
+import Foundation
 
 @main
 struct ONNXInference {

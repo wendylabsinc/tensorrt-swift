@@ -10,7 +10,7 @@
 //
 // Run with: ./scripts/swiftw run ImageClassifier
 import TensorRT
-import FoundationEssentials
+import Foundation
 
 @main
 struct ImageClassifier {

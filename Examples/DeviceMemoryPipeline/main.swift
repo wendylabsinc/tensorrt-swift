@@ -8,7 +8,7 @@
 //
 // Run with: ./scripts/swiftw run DeviceMemoryPipeline
 import TensorRT
-import FoundationEssentials
+import Foundation
 
 #if canImport(TensorRTNative)
 import TensorRTNative

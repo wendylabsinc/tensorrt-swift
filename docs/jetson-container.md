@@ -41,10 +41,10 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Swift 6.2+
+# Swift 6.3+
 RUN curl -L https://swiftlang.github.io/swiftly/swiftly-install.sh | bash
-RUN /root/.swiftly/bin/swiftly install 6.2
-ENV PATH="/root/.swiftly/bin:/root/.swiftly/toolchains/swift-6.2/usr/bin:${PATH}"
+RUN /root/.swiftly/bin/swiftly install 6.3.2
+ENV PATH="/root/.swiftly/bin:/root/.swiftly/toolchains/swift-6.3.2/usr/bin:${PATH}"
 
 WORKDIR /workspace
 ```

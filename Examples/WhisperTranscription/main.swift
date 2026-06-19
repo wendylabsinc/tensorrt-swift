@@ -10,7 +10,7 @@
 //
 // Run with: ./scripts/swiftw run WhisperTranscription
 import TensorRT
-import FoundationEssentials
+import Foundation
 
 @main
 struct WhisperTranscription {

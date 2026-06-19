@@ -1,4 +1,4 @@
-import FoundationEssentials
+import Foundation
 
 #if canImport(TensorRTNative)
 import TensorRTNative
@@ -9,7 +9,7 @@ import TensorRTNative
 /// The API favors value types, Sendable actors, and concise builders so it can be used from
 /// async contexts on Linux without leaning on `Foundation`. This file focuses purely on the
 /// public surface; the underlying CUDA/TensorRT bindings are intentionally left unimplemented.
-/// When wiring to TensorRT, prefer Swift 6.2 interop features (C++ interop, `Span`, and inline
+/// When wiring to TensorRT, prefer modern Swift interop features (C++ interop, `Span`, and inline
 /// arrays) to minimize copies and keep ABI boundaries thin.
 ///
 /// - Important: This package is a work in progress and is expected to have breaking API changes.
@@ -454,7 +454,11 @@ public struct InferenceResult: Sendable {
 
 // MARK: - Engine options
 
-/// Precision set requested when building an engine.
+/// Precision intent requested when building an engine.
+///
+/// TensorRT 11 removed weak precision builder flags such as global FP16/INT8 toggles.
+/// For ONNX builds, express reduced precision in the model itself with strong typing,
+/// ModelOpt AutoCast, or explicit quantize/dequantize nodes.
 public struct Precision: OptionSet, Sendable {
     public let rawValue: UInt8
 
@@ -523,6 +527,10 @@ public struct OptimizationProfile: Hashable, Sendable {
 
 /// Options used when building a TensorRT engine from a network or ONNX file.
 ///
+/// `precision` records the caller's precision intent, but the native ONNX builder does
+/// not apply legacy weak precision flags. For TensorRT 11 and newer, reduced precision
+/// should be encoded in the ONNX graph before build time.
+///
 /// For dynamic ONNX models, supply explicit optimization profiles via ``EngineBuildOptions/profiles``
 /// or provide fixed-shape hints via ``EngineBuildOptions/shapeHints`` to synthesize a single
 /// profile. Shape hints are ignored when explicit profiles are provided.
@@ -530,7 +538,7 @@ public struct OptimizationProfile: Hashable, Sendable {
 /// Example (shape hints):
 /// ```swift
 /// let options = EngineBuildOptions(
-///     precision: [.fp16],
+///     precision: [.fp32],
 ///     shapeHints: ["input": TensorShape([1, 3, 224, 224])]
 /// )
 /// let engine = try TensorRTRuntime().buildEngine(onnxURL: modelURL, options: options)
@@ -565,7 +573,7 @@ public struct EngineBuildOptions: Sendable {
     public var enableTF32: Bool
 
     public init(
-        precision: Precision = [.fp16, .fp32],
+        precision: Precision = [.fp32],
         workspaceSizeBytes: Int? = nil,
         maxStreams: Int = 1,
         tacticSources: [String] = [],
@@ -1701,8 +1709,8 @@ public actor ExecutionContext: ExecutionContexting {
     ///
     /// Use this to wait for completion without synchronizing the whole stream. This is most useful
     /// with `ExecutionQueue.external` and `enqueueDevice(..., synchronously: false)`.
-    public func recordEvent(_ event: TensorRTSystem.CUDAEvent) async throws {
 #if canImport(TensorRTNative)
+    public func recordEvent(_ event: TensorRTSystem.CUDAEvent) async throws {
         guard let plan = engine.serialized else {
             throw TensorRTError.invalidBinding("Engine does not contain serialized plan data.")
         }
@@ -1711,10 +1719,8 @@ public actor ExecutionContext: ExecutionContexting {
         guard status == 0 else {
             throw TensorRTError.runtimeUnavailable("Failed to record event on context stream (status \(status)).")
         }
-#else
-        throw TensorRTError.notImplemented("recordEvent requires TensorRTNative on Linux")
-#endif
     }
+#endif
 
     /// Selects the active optimization profile for the context.
     public func setOptimizationProfile(_ profile: OptimizationProfile) async throws {
@@ -1971,7 +1977,7 @@ public protocol TensorRTNativeInterface: Sendable {
     func buildEngine(onnxURL: URL, options: EngineBuildOptions) throws -> Engine
 }
 
-/// Default implementation that should be backed by Swift 6.2 C++ interop and Span-friendly buffer views.
+/// Default implementation that should be backed by Swift C++ interop and Span-friendly buffer views.
 public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
     public init() {}
 
@@ -2099,7 +2105,10 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
         var rawPtr: UnsafeMutablePointer<UInt8>?
         var size: Int = 0
 
-        let enableFp16: Int32 = options.precision.contains(.fp16) ? 1 : 0
+        // TensorRT 11 removed weak precision builder flags. Keep the C shim's
+        // compatibility argument at zero; callers should encode FP16/BF16/INT8
+        // intent directly in the model graph.
+        let precisionHints: Int32 = 0
         let workspace = options.workspaceSizeBytes.map { max(0, $0) } ?? 0
 
         func validatedShapeHint(_ shape: TensorShape, name: String) throws -> TensorShape {
@@ -2198,11 +2207,11 @@ public struct DefaultTensorRTNativeInterface: TensorRTNativeInterface {
                     ranges[i].tensorName = namePtrs[i]
                 }
                 if ranges.isEmpty {
-                    return trt_build_engine_from_onnx_file(pathPtr, enableFp16, workspace, &rawPtr, &size)
+                    return trt_build_engine_from_onnx_file(pathPtr, precisionHints, workspace, &rawPtr, &size)
                 }
                 return trt_build_engine_from_onnx_file_with_profiles(
                     pathPtr,
-                    enableFp16,
+                    precisionHints,
                     workspace,
                     ranges,
                     Int32(ranges.count),

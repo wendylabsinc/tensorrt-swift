@@ -1,7 +1,7 @@
-import FoundationEssentials
+import Foundation
 
 // This file intentionally avoids hard dependencies on TensorRT headers.
-// It sketches how Swift 6.2 C++ interop, Span, and InlineArray can be used when wiring to TensorRT.
+// It sketches how Swift C++ interop, Span, and InlineArray can be used when wiring to TensorRT.
 
 /// Placeholder C++ interop helpers for FFI boundaries. Replace these once TensorRT headers are available.
 public enum NativeFFI {

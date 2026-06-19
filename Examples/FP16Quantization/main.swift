@@ -1,21 +1,22 @@
-// FP16Quantization - Compare FP32 vs FP16 precision engines
+// FP16Quantization - Demonstrate TensorRT 11 FP16 migration behavior
 //
 // This example demonstrates:
-// 1. Building engines with different precision modes
-// 2. Comparing accuracy between FP32 and FP16
-// 3. Measuring performance differences
-// 4. Understanding precision trade-offs
+// 1. Building engines with FP32 and FP16 intent
+// 2. Understanding why TensorRT 11 no longer applies weak FP16 builder flags
+// 3. Measuring behavior for an untyped identity ONNX model
+// 4. Deciding when to use ModelOpt AutoCast or typed ONNX graphs
 //
 // Run with: ./scripts/swiftw run FP16Quantization
 import TensorRT
-import FoundationEssentials
+import Foundation
 
 @main
 struct FP16Quantization {
     static func main() async throws {
         print("=== FP16 Quantization Example ===\n")
-        print("This example compares FP32 and FP16 precision for TensorRT inference.")
-        print("Note: Using identity model - real models show more dramatic differences.\n")
+        print("This example demonstrates FP16 migration behavior for TensorRT 11.")
+        print("TensorRT 11 removed weak FP16 builder flags; use ModelOpt AutoCast or typed ONNX graphs for real FP16 engines.")
+        print("Note: this identity model is untyped FP32, so the FP16 intent is accepted but not applied as a global builder flag.\n")
 
         // Configuration
         let elementCount = 4096
@@ -25,7 +26,7 @@ struct FP16Quantization {
         print("  Elements: \(elementCount)")
         print("  Benchmark iterations: \(benchmarkIterations)")
 
-        // Step 1: Create ONNX model for both precision tests
+        // Step 1: Create ONNX model for both build paths
         print("\n1. Creating ONNX model...")
         let onnxURL = try createONNXModel(elementCount: elementCount)
         defer { try? FileManager.default.removeItem(at: onnxURL.deletingLastPathComponent()) }
@@ -45,16 +46,16 @@ struct FP16Quantization {
         print("   FP32 build time: \(fp32BuildTime)")
         print("   FP32 plan size: \(fp32Engine.serialized?.count ?? 0) bytes")
 
-        // Step 3: Build FP16 engine
-        print("\n3. Building FP16 engine...")
+        // Step 3: Build engine with FP16 intent. TensorRT 11 requires the model graph to carry precision.
+        print("\n3. Building engine with FP16 intent...")
         let fp16Start = ContinuousClock.now
         let fp16Engine = try runtime.buildEngine(
             onnxURL: onnxURL,
             options: EngineBuildOptions(precision: [.fp16], shapeHints: shapeHints)
         )
         let fp16BuildTime = ContinuousClock.now - fp16Start
-        print("   FP16 build time: \(fp16BuildTime)")
-        print("   FP16 plan size: \(fp16Engine.serialized?.count ?? 0) bytes")
+        print("   FP16-intent build time: \(fp16BuildTime)")
+        print("   FP16-intent plan size: \(fp16Engine.serialized?.count ?? 0) bytes")
 
         // Step 4: Compare plan sizes
         let fp32Size = fp32Engine.serialized?.count ?? 0
@@ -63,7 +64,7 @@ struct FP16Quantization {
 
         print("\n4. Plan Size Comparison:")
         print("   FP32: \(formatBytes(fp32Size))")
-        print("   FP16: \(formatBytes(fp16Size))")
+        print("   FP16 intent: \(formatBytes(fp16Size))")
         print("   Reduction: \(formatDouble(sizeReduction, decimals: 1))%")
 
         // Step 5: Create execution contexts
@@ -96,7 +97,7 @@ struct FP16Quantization {
                 output: &fp32Output
             )
 
-            // Run FP16
+            // Run FP16-intent engine
             var fp16Output: [Float] = []
             try await fp16Context.enqueueF32(
                 inputName: "input",
@@ -153,7 +154,7 @@ struct FP16Quantization {
         }
         let fp32BenchTime = ContinuousClock.now - fp32BenchStart
 
-        // Benchmark FP16
+        // Benchmark FP16-intent engine
         let fp16BenchStart = ContinuousClock.now
         for _ in 0..<benchmarkIterations {
             var output: [Float] = []
@@ -169,7 +170,7 @@ struct FP16Quantization {
         print("   │ Precision   │ Total Time         │ Throughput         │ Speedup  │")
         print("   ├─────────────┼────────────────────┼────────────────────┼──────────┤")
         print("   │ FP32        │ \(formatDuration(fp32BenchTime).padding(toLength: 18, withPad: " ", startingAt: 0)) │ \(formatDouble(fp32Throughput, decimals: 0).padding(toLength: 14, withPad: " ", startingAt: 0)) ops/s │ 1.00x    │")
-        print("   │ FP16        │ \(formatDuration(fp16BenchTime).padding(toLength: 18, withPad: " ", startingAt: 0)) │ \(formatDouble(fp16Throughput, decimals: 0).padding(toLength: 14, withPad: " ", startingAt: 0)) ops/s │ \(formatDouble(speedup, decimals: 2))x    │")
+        print("   │ FP16 intent │ \(formatDuration(fp16BenchTime).padding(toLength: 18, withPad: " ", startingAt: 0)) │ \(formatDouble(fp16Throughput, decimals: 0).padding(toLength: 14, withPad: " ", startingAt: 0)) ops/s │ \(formatDouble(speedup, decimals: 2))x    │")
         print("   └─────────────┴────────────────────┴────────────────────┴──────────┘")
 
         // Step 9: Memory bandwidth comparison
@@ -179,7 +180,7 @@ struct FP16Quantization {
         let fp16Bandwidth = Double(bytesPerOp) * fp16Throughput / 1e9
 
         print("   FP32 effective bandwidth: \(formatDouble(fp32Bandwidth, decimals: 2)) GB/s")
-        print("   FP16 effective bandwidth: \(formatDouble(fp16Bandwidth, decimals: 2)) GB/s")
+        print("   FP16-intent effective bandwidth: \(formatDouble(fp16Bandwidth, decimals: 2)) GB/s")
 
         // Step 10: Recommendations
         print("\n10. Precision Selection Guidelines:")
@@ -189,7 +190,7 @@ struct FP16Quantization {
         print("   │   - Scientific computing requiring exact results                │")
         print("   │   - Financial calculations                                      │")
         print("   ├─────────────────────────────────────────────────────────────────┤")
-        print("   │ Use FP16 when:                                                  │")
+        print("   │ Use typed FP16 or ModelOpt AutoCast when:                       │")
         print("   │   - Inference workloads (most common case)                      │")
         print("   │   - Memory-constrained environments                             │")
         print("   │   - Latency-critical applications                               │")

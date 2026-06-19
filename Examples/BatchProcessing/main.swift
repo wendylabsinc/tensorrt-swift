@@ -8,7 +8,7 @@
 //
 // Run with: ./scripts/swiftw run BatchProcessing
 import TensorRT
-import FoundationEssentials
+import Foundation
 
 @main
 struct BatchProcessing {

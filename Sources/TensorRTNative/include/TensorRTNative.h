@@ -83,10 +83,13 @@ int trt_build_dual_profile_identity_engine_f32(
 );
 
 // Builds a TensorRT engine from an ONNX file on disk.
+// `precisionHints` is retained for source compatibility. TensorRT 11 removed
+// weak precision builder flags, so ONNX precision should be represented in the
+// model graph with strong typing, ModelOpt AutoCast, or Q/DQ nodes.
 // Returns 0 on success and fills a serialized engine plan buffer to be freed with trt_free().
 int trt_build_engine_from_onnx_file(
   const char* onnxPath,
-  int32_t enableFp16,
+  int32_t precisionHints,
   size_t workspaceSizeBytes,
   uint8_t** outData,
   size_t* outSize
@@ -122,10 +125,11 @@ typedef struct trt_profile_binding_range {
 
 // Builds a TensorRT engine from an ONNX file with explicit optimization profiles (dynamic shapes).
 // Provide `profileCount > 0` and one or more `profileRanges` entries for each profile/input.
+// `precisionHints` is retained for source compatibility; see `trt_build_engine_from_onnx_file`.
 // Returns 0 on success and fills a serialized engine plan buffer to be freed with trt_free().
 int trt_build_engine_from_onnx_file_with_profiles(
   const char* onnxPath,
-  int32_t enableFp16,
+  int32_t precisionHints,
   size_t workspaceSizeBytes,
   const trt_profile_binding_range* profileRanges,
   int32_t profileRangeCount,

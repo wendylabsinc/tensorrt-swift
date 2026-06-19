@@ -1,6 +1,6 @@
 # ``TensorRT``
 
-Swift-first APIs for NVIDIA TensorRT on Linux (Swift 6.2+).
+Swift-first APIs for NVIDIA TensorRT on Linux (Swift 6.3+).
 
 This package is a **work in progress** and may introduce breaking changes frequently while the
 core runtime/building surface stabilizes.

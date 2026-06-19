@@ -14,6 +14,11 @@ let engine = try TensorRTRuntime().buildEngine(
 )
 ```
 
+TensorRT 11 removed weak precision builder flags such as global FP16 and INT8
+toggles. If you need reduced precision, convert or annotate the ONNX graph before
+building the engine, for example with ModelOpt AutoCast for FP16/BF16 or explicit
+Q/DQ nodes for quantized models.
+
 The returned ``Engine`` includes:
 - `serialized`: the built plan bytes (so you can persist/cache it if you want)
 - `description`: reflected input/output bindings
@@ -29,7 +34,7 @@ If you only need a single fixed shape for a dynamic model, shape hints are the s
 
 ```swift
 let options = EngineBuildOptions(
-    precision: [.fp16],
+    precision: [.fp32],
     shapeHints: ["input": TensorShape([1, 3, 224, 224])]
 )
 let engine = try TensorRTRuntime().buildEngine(onnxURL: modelURL, options: options)

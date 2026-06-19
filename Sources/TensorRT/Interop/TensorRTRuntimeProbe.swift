@@ -1,4 +1,8 @@
+#if os(Linux)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 public enum TensorRTRuntimeProbe {
     public struct Version: Sendable, Hashable, CustomStringConvertible {
@@ -79,4 +83,3 @@ public enum TensorRTRuntimeProbe {
         return String(cString: err)
     }
 }
-

@@ -1,11 +1,11 @@
 # Getting Started
 
-This package targets **Swift 6.2+** and **Linux** machines where TensorRT and the NVIDIA driver stack
+This package targets **Swift 6.3+** and **Linux** machines where TensorRT and the NVIDIA driver stack
 are available.
 
 ## Requirements
 
-- Swift 6.2+
+- Swift 6.3+
 - Linux
 - TensorRT system libraries available at runtime:
   - `libnvinfer.so`

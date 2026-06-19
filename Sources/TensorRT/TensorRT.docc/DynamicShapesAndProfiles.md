@@ -40,7 +40,7 @@ runtime synthesize a single profile (min/opt/max are all set to the hinted shape
 let engine = try TensorRTRuntime().buildEngine(
     onnxURL: URL(fileURLWithPath: "dynamic.onnx"),
     options: EngineBuildOptions(
-        precision: [.fp16],
+        precision: [.fp32],
         shapeHints: ["input": TensorShape([1, 8])]
     )
 )

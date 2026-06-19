@@ -1,10 +1,10 @@
 # TensorRT Swift (Linux)
 
 [![CI](https://github.com/wendylabsinc/tensorrt-swift/actions/workflows/ci.yml/badge.svg)](https://github.com/wendylabsinc/tensorrt-swift/actions/workflows/ci.yml)
-![Swift 6.2+](https://img.shields.io/badge/Swift-6.2%2B-F05138?logo=swift&logoColor=white)
+![Swift 6.3+](https://img.shields.io/badge/Swift-6.3%2B-F05138?logo=swift&logoColor=white)
 ![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)
-![TensorRT](https://img.shields.io/badge/TensorRT-10.x-76B900?logo=nvidia&logoColor=white)
-![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia&logoColor=white)
+![TensorRT](https://img.shields.io/badge/TensorRT-11.x-76B900?logo=nvidia&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-13.3-76B900?logo=nvidia&logoColor=white)
 
 Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT on Linux, with a separate TensorRTLLM product for LLM-specific extensions.
 
@@ -12,7 +12,7 @@ Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT on
 
 This repository is **work in progress** and **subject to breaking changes** while the low-level foundations are being established.
 
-Swift 6.2 features are used aggressively where feasible:
+Modern Swift features are used aggressively where feasible:
 - `InlineArray` to keep common small metadata (like shapes/strides) allocation-free
 - `Span` / `MutableSpan` / `Data.bytes` for safer, more composable views over contiguous memory
 - Actor-based `ExecutionContext` for thread-safe inference
@@ -37,7 +37,7 @@ The package links against the following system libraries at **build time** and *
 Use the official TensorRT container which includes all dependencies:
 
 ```bash
-docker run --gpus all -it nvcr.io/nvidia/tensorrt:24.08-py3
+docker run --gpus all -it nvcr.io/nvidia/tensorrt:26.05-py3
 ```
 
 #### Option 1b: Jetson Container (Orin Nano, AGX Thor)
@@ -48,24 +48,24 @@ Jetson uses aarch64 containers and must match the host JetPack/L4T release. See
 #### Option 2: System Installation (Ubuntu/Debian)
 
 ```bash
-# 1. Install CUDA 12.6
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+# 1. Install CUDA 13.3
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt-get update
-sudo apt-get install -y cuda-toolkit-12-6
+sudo apt-get install -y cuda-toolkit-13-3
 
-# 2. Install TensorRT 10.x
-sudo apt-get install -y libnvinfer10 libnvinfer-plugin10 libnvonnxparser10 libnvinfer-dev
+# 2. Install TensorRT 11.x
+sudo apt-get install -y tensorrt
 
 # 3. Add CUDA to your path
-export PATH=/usr/local/cuda-12.6/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-12.6/lib64:$LD_LIBRARY_PATH
+export PATH=/usr/local/cuda-13.3/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-13.3/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
 
 #### Option 3: From NVIDIA Developer Downloads
 
-1. Download [CUDA Toolkit 12.6](https://developer.nvidia.com/cuda-downloads)
-2. Download [TensorRT 10.x](https://developer.nvidia.com/tensorrt) (requires NVIDIA Developer account)
+1. Download [CUDA Toolkit 13.3](https://developer.nvidia.com/cuda-downloads)
+2. Download [TensorRT 11.x](https://developer.nvidia.com/tensorrt) (requires NVIDIA Developer account)
 3. Follow NVIDIA's installation guides
 
 ### Verifying Installation
@@ -82,11 +82,11 @@ ls /usr/lib/x86_64-linux-gnu/libnvinfer*
 
 ### Swift Installation
 
-Install Swift 6.2+ via [Swiftly](https://swiftlang.github.io/swiftly/):
+Install Swift 6.3+ via [Swiftly](https://swiftlang.github.io/swiftly/):
 
 ```bash
 curl -L https://swiftlang.github.io/swiftly/swiftly-install.sh | bash
-swiftly install 6.2
+swiftly install 6.3.2
 ```
 
 ### Development Workflow (macOS/Windows)
@@ -160,7 +160,7 @@ print("Free GPU memory: \(mem.free / 1_000_000_000) GB")
 ### Add the package to your `Package.swift`
 
 ```swift
-// swift-tools-version: 6.2
+// swift-tools-version: 6.3
 import PackageDescription
 
 let package = Package(
@@ -235,6 +235,11 @@ let batch = InferenceBatch(inputs: [
 ])
 let result = try await ctx.enqueue(batch)
 ```
+
+TensorRT 11 removed weak precision builder flags such as global FP16 and INT8 toggles.
+For reduced precision, convert or annotate the ONNX graph before building the engine.
+Use ModelOpt AutoCast for FP16/BF16-style conversion and explicit Q/DQ nodes for
+quantized models.
 
 ### Streaming inference (for LLMs)
 
@@ -319,7 +324,7 @@ LLM examples live under `ExamplesLLM/`.
 | **MultiGPU** | Distribute inference across multiple GPUs | `./scripts/swiftw run MultiGPU` |
 | **CUDAEventPipelining** | Overlap compute with data transfer using events | `./scripts/swiftw run CUDAEventPipelining` |
 | **BenchmarkSuite** | Comprehensive throughput/latency measurement | `./scripts/swiftw run BenchmarkSuite` |
-| **FP16Quantization** | Compare FP32 vs FP16 precision and performance | `./scripts/swiftw run FP16Quantization` |
+| **FP16Quantization** | Demonstrate the FP16/AutoCast migration caveat on TensorRT 11 | `./scripts/swiftw run FP16Quantization` |
 
 ### Real-World Examples
 
@@ -371,10 +376,10 @@ export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 
 ### `CUDA driver version is insufficient`
 
-Your NVIDIA driver is too old for CUDA 12.6. Update your driver:
+Your NVIDIA driver is too old for CUDA 13.3. Update your driver:
 
 ```bash
-sudo apt-get install nvidia-driver-550  # or newer
+sudo apt-get install nvidia-driver-595  # or newer
 ```
 
 ### Swift can't find CUDA headers

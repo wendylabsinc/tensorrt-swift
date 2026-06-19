@@ -7,7 +7,7 @@
 //
 // Run with: ./scripts/swiftw run MultiProfile
 import TensorRT
-import FoundationEssentials
+import Foundation
 
 @main
 struct MultiProfile {

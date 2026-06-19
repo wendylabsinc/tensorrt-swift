@@ -7,7 +7,7 @@
 //
 // Run with: ./scripts/swiftw run DynamicBatching
 import TensorRT
-import FoundationEssentials
+import Foundation
 
 @main
 struct DynamicBatching {
