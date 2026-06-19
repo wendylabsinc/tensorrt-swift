@@ -63,6 +63,12 @@ void trtEnableFp16(nvinfer1::IBuilderConfig* config) {
   if (!config) {
     return;
   }
+#if defined(NV_TENSORRT_MAJOR) && NV_TENSORRT_MAJOR >= 11
+  // TensorRT 11 removed the legacy precision BuilderFlag values such as kFP16.
+  // Precision is represented by strongly typed network/tensor configuration, so
+  // keep this compatibility hook as a no-op for TensorRT 11+ headers.
+  return;
+#else
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -75,6 +81,7 @@ void trtEnableFp16(nvinfer1::IBuilderConfig* config) {
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)
 #pragma GCC diagnostic pop
+#endif
 #endif
 }
 
