@@ -1165,7 +1165,7 @@ public actor ExecutionContext: ExecutionContexting {
             }
 
             func executeStateless(plan: Data, inputPairs: [(name: String, data: Data)], outputPairs: inout [(name: String, data: Data)]) throws -> Int32 {
-                try withCStringPointers(inputPairs.map(\.name) + outputPairs.map(\.name)) { namePtrs in
+                withCStringPointers(inputPairs.map(\.name) + outputPairs.map(\.name)) { namePtrs in
                     var inputPointers: [UnsafeRawPointer?] = []
                     inputPointers.reserveCapacity(inputPairs.count)
 
@@ -1302,7 +1302,7 @@ public actor ExecutionContext: ExecutionContexting {
         }
 
         func execute(plan: Data, inputPairs: [(name: String, data: Data)], outputPairs: inout [(name: String, data: Data)]) throws -> Int32 {
-            try withCStringPointers(inputPairs.map(\.name) + outputPairs.map(\.name)) { namePtrs in
+            withCStringPointers(inputPairs.map(\.name) + outputPairs.map(\.name)) { namePtrs in
                 var inputPointers: [UnsafeRawPointer?] = []
                 inputPointers.reserveCapacity(inputPairs.count)
 
@@ -1331,7 +1331,7 @@ public actor ExecutionContext: ExecutionContexting {
         }
 
         func executeStateless(plan: Data, inputPairs: [(name: String, data: Data)], outputPairs: inout [(name: String, data: Data)]) throws -> Int32 {
-            try withCStringPointers(inputPairs.map(\.name) + outputPairs.map(\.name)) { namePtrs in
+            withCStringPointers(inputPairs.map(\.name) + outputPairs.map(\.name)) { namePtrs in
                 var inputPointers: [UnsafeRawPointer?] = []
                 inputPointers.reserveCapacity(inputPairs.count)
 
