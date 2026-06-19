@@ -1169,7 +1169,7 @@ public actor ExecutionContext: ExecutionContexting {
                     var inputPointers: [UnsafeRawPointer?] = []
                     inputPointers.reserveCapacity(inputPairs.count)
 
-                    return try withInputPointers(inputPairs, 0, &inputPointers) { inPtrs in
+                    return withInputPointers(inputPairs, 0, &inputPointers) { inPtrs in
                         var outputPointers: [UnsafeMutableRawPointer?] = []
                         outputPointers.reserveCapacity(outputPairs.count)
 
@@ -1306,7 +1306,7 @@ public actor ExecutionContext: ExecutionContexting {
                 var inputPointers: [UnsafeRawPointer?] = []
                 inputPointers.reserveCapacity(inputPairs.count)
 
-                return try withInputPointers(inputPairs, 0, &inputPointers) { inPtrs in
+                return withInputPointers(inputPairs, 0, &inputPointers) { inPtrs in
                     var outputPointers: [UnsafeMutableRawPointer?] = []
                     outputPointers.reserveCapacity(outputPairs.count)
 
@@ -1335,7 +1335,7 @@ public actor ExecutionContext: ExecutionContexting {
                 var inputPointers: [UnsafeRawPointer?] = []
                 inputPointers.reserveCapacity(inputPairs.count)
 
-                return try withInputPointers(inputPairs, 0, &inputPointers) { inPtrs in
+                return withInputPointers(inputPairs, 0, &inputPointers) { inPtrs in
                     var outputPointers: [UnsafeMutableRawPointer?] = []
                     outputPointers.reserveCapacity(outputPairs.count)
 
