@@ -6,6 +6,8 @@
 ![TensorRT](https://img.shields.io/badge/TensorRT-11.x-76B900?logo=nvidia&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-13.3-76B900?logo=nvidia&logoColor=white)
 
+![TensorRT Swift social preview](docs/assets/tensorrt-swift-social.png)
+
 Swift Package that provides Swift-first APIs for working with NVIDIA TensorRT on Linux, with a separate TensorRTLLM product for LLM-specific extensions.
 
 > **Note**: The `TensorRT` product wraps the **TensorRT** inference engine. The `TensorRTLLM` product is a thin extension layer today; full TensorRT-LLM integration (in-flight batching, KV-cache management, tensor parallelism) is planned for future releases.
