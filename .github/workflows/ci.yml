@@ -9,7 +9,7 @@ on:
 jobs:
   build-and-test:
     name: Build & Test (GPU)
-    runs-on: [self-hosted, rtx4090]
+    runs-on: [self-hosted, wendy-linux, rtx4090]
     
     steps:
       - name: Checkout
